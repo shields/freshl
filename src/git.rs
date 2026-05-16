@@ -751,7 +751,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let canonical = std::fs::canonicalize(dir.path()).unwrap();
         std::os::unix::fs::symlink("/dev/null", canonical.join("entry")).unwrap();
-        let link_dir = dir.path().join("via_link");
+        // Put the directory symlink in a separate tempdir so its path can't
+        // share a prefix with `canonical`. Otherwise on platforms where the
+        // tempdir is already its own canonical path (Linux), the lexical
+        // strip_prefix would succeed and yield `via_link/entry`, bypassing
+        // the parent-canonicalisation fallback this test exists to cover.
+        let link_parent = tempfile::tempdir().unwrap();
+        let link_dir = link_parent.path().join("via_link");
         std::os::unix::fs::symlink(&canonical, &link_dir).unwrap();
 
         let mut statuses = HashMap::new();

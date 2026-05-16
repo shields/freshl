@@ -1,7 +1,7 @@
 #[cfg(not(unix))]
 compile_error!("freshl targets POSIX file metadata and only builds on Unix.");
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -11,10 +11,14 @@ pub mod args;
 pub mod collect;
 pub mod entry;
 pub mod error;
+pub mod format;
+pub mod owner;
 
 use args::{Action, parse};
-use entry::EntryKind;
+use entry::{Entry, EntryKind};
 use error::Error;
+use format::{Row, build_row, compute_widths, render_row};
+use owner::{OwnerCache, SystemDirectory};
 
 #[must_use]
 pub fn run<I>(raw: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode
@@ -62,13 +66,9 @@ fn list(
     let targets: &[PathBuf] = if paths.is_empty() { &fallback } else { paths };
     let multi = targets.len() > 1;
     let mut had_error = false;
-    // `have_output` tracks whether a prior target produced stdout output;
-    // `last_was_dir` lets us match ls's separator rule — files printed
-    // sequentially stay tight, but a blank line precedes any directory listing
-    // (or follows one). Failed preflight stats don't produce stdout output, so
-    // they leave both flags untouched.
     let mut have_output = false;
     let mut last_was_dir = false;
+    let mut owners = OwnerCache::new(SystemDirectory);
 
     for target in targets {
         let entry = match collect::entry_for_path(target) {
@@ -90,7 +90,7 @@ fn list(
         if have_output && (this_is_dir || last_was_dir) {
             writeln!(stdout).map_err(stdout_io)?;
         }
-        match list_target(stdout, stderr, target, multi, &entry) {
+        match list_target(stdout, stderr, target, multi, &entry, &mut owners) {
             Ok(target_had_error) => {
                 had_error |= target_had_error;
                 have_output = true;
@@ -110,33 +110,22 @@ fn list(
     })
 }
 
-/// Returns `Ok(true)` if the directory listing succeeded but had per-child
-/// stat failures that were reported to stderr (caller sets the exit code to
-/// 1). Returns `Err` only for stdout failures or for top-level errors that
-/// abort this target entirely.
-///
-/// Per-child entries that fail `lstat` are reported on stderr but not added
-/// to the stdout listing. Carrying the filename alone (without the metadata
-/// the opinionated layout assumes) would require a partial-`Entry` shape that
-/// downstream formatters don't yet model; the chunk-3 behavior is to surface
-/// the missing children via their stderr message.
 fn list_target(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     target: &Path,
     show_label: bool,
-    entry: &entry::Entry,
+    entry: &Entry,
+    owners: &mut OwnerCache<SystemDirectory>,
 ) -> Result<bool, Error> {
-    // CLI-supplied symlinks are surfaced as symlinks (not followed) to match
-    // the project's no-`-L` stance; the user sees what's actually present.
     if entry.kind != EntryKind::Directory {
-        // Print the path as the user supplied it, matching `ls FILE`.
-        write_path_with_suffix(stdout, target, b"\n")?;
+        // Print the file's row using the user-supplied path as the name, so
+        // `freshl /etc/passwd` renders `… /etc/passwd` (not just `passwd`).
+        let mut for_display = entry.clone();
+        for_display.name = target.as_os_str().to_os_string();
+        render_entries(stdout, &[for_display], owners)?;
         return Ok(false);
     }
-    // Read the directory first so an unopenable directory doesn't leave a
-    // dangling `target:` label on stdout; the label is only written when we
-    // have a listing to follow it.
     let listing = collect::collect_directory(target).map_err(|source| Error::Io {
         path: target.to_path_buf(),
         source,
@@ -145,14 +134,10 @@ fn list_target(
         write_path_with_suffix(stdout, target, b":\n")?;
     }
     let mut entries = listing.entries;
-    // Temporary alphabetical sort so chunk 3 output is deterministic; chunk 5
+    // Temporary alphabetical sort so chunk 4 output is deterministic; chunk 5
     // replaces this with a natural-order, dirs-first comparator.
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in &entries {
-        write_name_line(stdout, &e.name)?;
-    }
-    // Surface per-child stat failures the same way `ls` does: one warning per
-    // failing path on stderr, while still printing the children that did stat.
+    render_entries(stdout, &entries, owners)?;
     for (path, source) in &listing.errors {
         let _ = writeln!(
             stderr,
@@ -166,11 +151,46 @@ fn list_target(
     Ok(!listing.errors.is_empty())
 }
 
+fn render_entries(
+    stdout: &mut dyn Write,
+    entries: &[Entry],
+    owners: &mut OwnerCache<SystemDirectory>,
+) -> Result<(), Error> {
+    let mut rows: Vec<Row> = entries.iter().map(|e| build_row(e, owners)).collect();
+    for (row, entry) in rows.iter_mut().zip(entries.iter()) {
+        if entry.kind == EntryKind::Symlink && target_is_missing(entry) {
+            row.name = format::name::format_name(entry, false, true);
+        }
+    }
+    let widths = compute_widths(&rows);
+    for row in &rows {
+        let line = render_row(row, widths, 0);
+        stdout.write_all(&line).map_err(stdout_io)?;
+        stdout.write_all(b"\n").map_err(stdout_io)?;
+    }
+    Ok(())
+}
+
+fn target_is_missing(entry: &Entry) -> bool {
+    let Some(target) = &entry.symlink_target else {
+        return false;
+    };
+    let absolute = if target.is_absolute() {
+        target.clone()
+    } else {
+        entry
+            .path
+            .parent()
+            .map_or_else(|| target.clone(), |parent| parent.join(target))
+    };
+    std::fs::metadata(absolute).is_err()
+}
+
 // Write the path's raw OS bytes followed by `suffix`. Filenames on Unix are
 // arbitrary byte sequences; using `Display` (which goes through
 // `to_string_lossy`) would replace invalid UTF-8 with U+FFFD and break
 // pipelines. TTY-aware quoting/escaping of control characters in names is a
-// separate concern from byte-fidelity and is not part of chunk 3.
+// separate concern from byte-fidelity and is not part of this chunk.
 fn write_path_with_suffix(
     stdout: &mut dyn Write,
     path: &Path,
@@ -180,11 +200,6 @@ fn write_path_with_suffix(
         .write_all(path.as_os_str().as_bytes())
         .map_err(stdout_io)?;
     stdout.write_all(suffix).map_err(stdout_io)
-}
-
-fn write_name_line(stdout: &mut dyn Write, name: &OsStr) -> Result<(), Error> {
-    stdout.write_all(name.as_bytes()).map_err(stdout_io)?;
-    stdout.write_all(b"\n").map_err(stdout_io)
 }
 
 const fn stdout_io(source: std::io::Error) -> Error {
@@ -301,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn listing_directory_arg_prints_entries() {
+    fn listing_directory_arg_prints_rows() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("file"), b"hi").unwrap();
         let mut out = Vec::new();
@@ -310,10 +325,12 @@ mod tests {
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("file"));
+        // Row layout starts with the kind char + space.
+        assert!(text.starts_with("- ") || text.contains("\n- "));
     }
 
     #[test]
-    fn listing_file_arg_prints_one_name() {
+    fn listing_file_arg_prints_one_row_with_full_path() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("only");
         fs::write(&file, b"hi").unwrap();
@@ -323,7 +340,7 @@ mod tests {
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text.lines().count(), 1);
-        assert!(text.contains("only"));
+        assert!(text.contains(file.to_str().unwrap()));
     }
 
     #[test]
@@ -408,6 +425,101 @@ mod tests {
     }
 
     #[test]
+    fn broken_symlink_renders_with_red_target_indicator() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nope"), &link).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(os(&[dir.path().to_str().unwrap()]), &mut out, &mut err);
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        // The target painted red embeds the AnsiColor::Red SGR sequence.
+        assert!(out.windows(2).any(|w| w == b"31"));
+    }
+
+    #[test]
+    fn relative_broken_symlink_resolves_relative_to_parent() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("rellink");
+        std::os::unix::fs::symlink("does-not-exist", &link).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(os(&[dir.path().to_str().unwrap()]), &mut out, &mut err);
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("rellink"));
+        assert!(text.contains("does-not-exist"));
+    }
+
+    #[test]
+    fn target_is_missing_handles_absolute() {
+        use super::target_is_missing;
+        use crate::entry::{Entry, EntryKind};
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        use std::time::SystemTime;
+        let e = Entry {
+            name: OsString::from("link"),
+            path: PathBuf::from("/tmp/link"),
+            kind: EntryKind::Symlink,
+            mode: 0,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            mtime: SystemTime::UNIX_EPOCH,
+            symlink_target: Some(PathBuf::from("/definitely/does/not/exist/anywhere")),
+        };
+        assert!(target_is_missing(&e));
+    }
+
+    #[test]
+    fn target_is_missing_is_false_when_target_is_none() {
+        use super::target_is_missing;
+        use crate::entry::{Entry, EntryKind};
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        use std::time::SystemTime;
+        let e = Entry {
+            name: OsString::from("file"),
+            path: PathBuf::from("file"),
+            kind: EntryKind::RegularFile,
+            mode: 0,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            mtime: SystemTime::UNIX_EPOCH,
+            symlink_target: None,
+        };
+        assert!(!target_is_missing(&e));
+    }
+
+    #[test]
+    fn target_is_missing_resolves_relative_when_link_path_has_no_parent() {
+        use super::target_is_missing;
+        use crate::entry::{Entry, EntryKind};
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+        use std::time::SystemTime;
+        // `Path::new("/").parent()` returns `None`, exercising the
+        // `map_or_else` no-parent arm in `target_is_missing`.
+        let e = Entry {
+            name: OsString::from("/"),
+            path: PathBuf::from("/"),
+            kind: EntryKind::Symlink,
+            mode: 0,
+            nlink: 0,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            mtime: SystemTime::UNIX_EPOCH,
+            symlink_target: Some(PathBuf::from("does-not-exist-anywhere")),
+        };
+        assert!(target_is_missing(&e));
+    }
+
+    #[test]
     fn listing_continues_past_missing_paths() {
         let dir = tempdir().unwrap();
         let good = dir.path().join("good");
@@ -474,6 +586,16 @@ mod tests {
             &mut out,
             &mut err,
         );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+    }
+
+    #[test]
+    fn list_row_trailing_newline_write_failure_surfaces_io_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("only"), b"hi").unwrap();
+        let mut out = FailOnNewline::new(0);
+        let mut err = Vec::new();
+        let code = run(os(&[dir.path().to_str().unwrap()]), &mut out, &mut err);
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
     }
 

@@ -9,9 +9,11 @@ test:
 lint:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
+	bunx prettier --check '**/*.md'
 
 fmt:
 	cargo fmt
+	bunx prettier --write '**/*.md'
 
 # cargo-llvm-cov auto-sets cfg(coverage_nightly) on nightly; passing --cfg
 # explicitly is rejected. Do not add --cfg coverage_nightly here.

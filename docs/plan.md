@@ -10,8 +10,8 @@ Coverage is gated, not aspirational. Every line that ships must be exercised by
 a test, with `coverage(off)` permitted only on `main` (per the
 `right-answers/rust.md` convention). Concretely:
 
-- `make coverage` runs `cargo +nightly llvm-cov --cfg coverage_nightly
-  --fail-under-lines 100` and is a CI-blocking job.
+- `make coverage` runs `cargo +nightly llvm-cov --cfg coverage_nightly --fail-under-lines 100`
+  and is a CI-blocking job.
 - A PR that drops coverage below 100 % fails the same way a lint or test
   failure does. There is no "we'll backfill later" branch.
 - New code lands with its tests in the same commit. If a code path is hard to

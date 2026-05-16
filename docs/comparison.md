@@ -45,6 +45,7 @@ The Rust-based pioneer. Last release 2021; the repo carries a notice pointing
 to eza. Listed here for completeness — don't use it.
 
 Design moves worth remembering:
+
 - Color-coded permissions, with a separate color per bit.
 - Git status column in long mode.
 - Tree view as a first-class option (`-T`), not a separate `tree` binary.
@@ -103,7 +104,7 @@ mental models worth stealing from.
 Built into Nushell. Returns a table of structured records — name, type, size,
 modified — that pipes into other Nushell commands as data, not text.
 
-- **Strength**: the columnar long view is the *only* view. No grid/long
+- **Strength**: the columnar long view is the _only_ view. No grid/long
   dichotomy. Sortable, filterable, projectable via the shell's data
   pipeline.
 - **Lesson**: even a CLI tool can lean further into "table of files" over
@@ -124,7 +125,7 @@ Replaces `tree` more than `ls`.
 
 - **Lesson**: in a TTY, "show me a tree, let me filter" is often what you
   actually wanted. Not relevant to a non-interactive `ls` replacement, but
-  worth keeping in mind for what `freshl` *won't* try to be.
+  worth keeping in mind for what `freshl` _won't_ try to be.
 
 ### tree
 
@@ -133,17 +134,17 @@ everywhere. Every modern alternative absorbed it as a `-T` flag.
 
 ## Synthesis: what each tool gets right
 
-| Tool      | Best idea worth keeping                                              |
-| --------- | -------------------------------------------------------------------- |
-| GNU ls    | Be fast, be a single binary, be scriptable                           |
-| BSD ls    | (nothing distinctive — has been overtaken)                           |
-| exa       | Per-bit permission colors, color-scaled sizes                        |
-| eza       | ISO time mode (`--time-style=iso`); OSC 8 hyperlinks                 |
-| lsd       | Visual hierarchy via consistent type/size coloring                   |
-| nushell   | "Table of files" as the *only* model, not as a `-l` mode             |
-| nuls      | Type tags over icons for type identification                         |
-| broot     | Trees beat grids when there's more than a screenful                  |
-| tree      | Tree drawing is a solved problem; copy it                            |
+| Tool    | Best idea worth keeping                                  |
+| ------- | -------------------------------------------------------- |
+| GNU ls  | Be fast, be a single binary, be scriptable               |
+| BSD ls  | (nothing distinctive — has been overtaken)               |
+| exa     | Per-bit permission colors, color-scaled sizes            |
+| eza     | ISO time mode (`--time-style=iso`); OSC 8 hyperlinks     |
+| lsd     | Visual hierarchy via consistent type/size coloring       |
+| nushell | "Table of files" as the _only_ model, not as a `-l` mode |
+| nuls    | Type tags over icons for type identification             |
+| broot   | Trees beat grids when there's more than a screenful      |
+| tree    | Tree drawing is a solved problem; copy it                |
 
 ## Synthesis: what they get wrong
 
@@ -245,9 +246,9 @@ Drawing from the above, the design `freshl` commits to:
 
 ### Git integration
 
-15. **Two-character git status column**, matching `git status
-    --porcelain` with one addition. First char = index, second =
-    worktree. Symbols: `M` modified, `A` added, `D` deleted, `R`
+15. **Two-character git status column**, matching `git status --porcelain`
+    with one addition. First char = index, second = worktree. Symbols:
+    `M` modified, `A` added, `D` deleted, `R`
     renamed, `C` copied, `T` type-change, `U` unmerged. `??` for
     untracked and `!!` for ignored (both positions). The one
     extension to porcelain: tracked-and-clean renders as `✓` in

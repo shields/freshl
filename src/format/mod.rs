@@ -28,6 +28,9 @@ pub struct Row {
     pub owner: String,
     pub group: String,
     pub size: String,
+    /// Visible digit count for `size`. Tracked separately because `size`
+    /// carries ANSI dim escapes whose bytes would skew `chars().count()`.
+    pub size_width: usize,
     pub mtime: String,
     pub git: Option<String>,
     /// Raw bytes for the name column (ANSI escapes interleaved with the
@@ -38,13 +41,15 @@ pub struct Row {
 
 pub fn build_row<D: UserDirectory>(entry: &Entry, owners: &mut OwnerCache<D>) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
+    let (size, size_width) = size::format_size(entry.size, dim);
     Row {
         kind: entry.kind.type_char(),
         mode: perms::format_perms(entry.mode),
         nlink: entry.nlink.to_string(),
         owner: owners.user(entry.uid).to_string_lossy().into_owned(),
         group: owners.group(entry.gid).to_string_lossy().into_owned(),
-        size: size::format_size(entry.size),
+        size,
+        size_width,
         mtime: time::format_time_styled(entry.mtime, dim),
         git: None,
         name: name::format_name(entry, false, false),
@@ -55,13 +60,14 @@ pub fn build_row<D: UserDirectory>(entry: &Entry, owners: &mut OwnerCache<D>) ->
 pub fn compute_widths(rows: &[Row]) -> ColumnWidths {
     // `chars().count()` measures display width via std's `fmt` padding rules
     // (which count chars, not bytes); using `.len()` would over-allocate
-    // padding for any owner/group containing multi-byte UTF-8.
+    // padding for any owner/group containing multi-byte UTF-8. Size uses its
+    // own pre-computed width because its string carries ANSI escapes.
     ColumnWidths {
         mode: max_width(rows, |r| &r.mode),
         nlink: max_width(rows, |r| &r.nlink),
         owner: max_width(rows, |r| &r.owner),
         group: max_width(rows, |r| &r.group),
-        size: max_width(rows, |r| &r.size),
+        size: rows.iter().map(|r| r.size_width).max().unwrap_or(0),
     }
 }
 
@@ -77,7 +83,12 @@ pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> 
     let _ = write!(out, "{:>w$} ", row.nlink, w = widths.nlink);
     let _ = write!(out, "{:<w$} ", row.owner, w = widths.owner);
     let _ = write!(out, "{:<w$} ", row.group, w = widths.group);
-    let _ = write!(out, "{:>w$} ", row.size, w = widths.size);
+    // Size column carries ANSI escapes, so pad by visual width rather than
+    // letting `{:>w$}` count escape bytes as visible characters.
+    let pad = widths.size.saturating_sub(row.size_width);
+    out.extend(std::iter::repeat_n(b' ', pad));
+    out.extend_from_slice(row.size.as_bytes());
+    out.push(b' ');
     let _ = write!(out, "{} ", row.mtime);
     if git_width > 0 {
         if let Some(g) = &row.git {
@@ -147,6 +158,7 @@ mod tests {
                 owner: "x".into(),
                 group: "staff".into(),
                 size: "1".into(),
+                size_width: 1,
                 mtime: "2026".into(),
                 git: None,
                 name: b"a".to_vec(),
@@ -158,6 +170,7 @@ mod tests {
                 owner: "longer".into(),
                 group: "g".into(),
                 size: "1234".into(),
+                size_width: 4,
                 mtime: "2026".into(),
                 git: None,
                 name: b"b".to_vec(),
@@ -187,6 +200,7 @@ mod tests {
             owner: "alice".into(),
             group: "staff".into(),
             size: "0".into(),
+            size_width: 1,
             mtime: "2026-05-15T11:02:00Z".into(),
             git: None,
             name: b"src".to_vec(),
@@ -212,6 +226,7 @@ mod tests {
             owner: "alice".into(),
             group: "staff".into(),
             size: "0".into(),
+            size_width: 1,
             mtime: "2026-05-15T11:02:00Z".into(),
             git: Some("M ".into()),
             name: b"file".to_vec(),
@@ -240,6 +255,7 @@ mod tests {
             owner: "alice".into(),
             group: "staff".into(),
             size: "0".into(),
+            size_width: 1,
             mtime: "2026-05-15T11:02:00Z".into(),
             git: None,
             name: vec![b'a', 0xFF, b'b'],

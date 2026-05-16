@@ -100,7 +100,8 @@ src/
 ├── format/
 │   ├── mod.rs         Row -> String, drives column widths
 │   ├── perms.rs       u32 mode → "755"
-│   ├── size.rs        u64 bytes → "12_345678" right-aligned
+│   ├── size.rs        u64 bytes → "12345678" right-aligned, trailing
+│   │                  six-digit groups dimmed for scannability
 │   ├── time.rs        SystemTime → "2026-05-15T11:02:00Z" with dim T/Z
 │   ├── name.rs        filename coloring by EntryKind, dim if ignored,
 │   │                  symlink "name → target"
@@ -135,8 +136,9 @@ Each step is a small commit with tests in the same commit. Coverage stays at
    Implement natural-order inline (≈30 lines) rather than pull in a crate.
 7. **Formatting — non-git path**:
    - `perms.rs`: `(mode & 0o777)` → `"{:o}"`.
-   - `size.rs`: group from the right into clusters of six digits, separator
-     `_`, right-aligned to the widest entry in the listing.
+   - `size.rs`: emit raw digits, right-aligned to the widest entry in the
+     listing. Digits past the leading six-digit-aligned group are dimmed so
+     the megabyte/terabyte boundary is visible without altering the text.
    - `time.rs`:
      `jiff::Timestamp::from_second(secs).strftime("%Y-%m-%dT%H:%M:%SZ")`.
      Styling: split at `T` and `Z`, dim those two characters with `anstyle`.
@@ -170,8 +172,9 @@ Each step is a small commit with tests in the same commit. Coverage stays at
 - `format::perms`: `0o755` → `"755"`; `0o644` → `"644"`; `0o7777` → `"7777"`
   (sticky / setuid only when set).
 - `format::size`: 0 → `"0"`, 123 → `"123"`, 999_999 → `"999999"`,
-  1_000_000 → `"1_000000"`, 1_234_567_890 → `"1234_567890"`,
-  999_999_999_999 → `"999999_999999"`.
+  1_000_000 → `"1000000"` with `000000` dimmed, 1_234_567_890 →
+  `"1234567890"` with `567890` dimmed, 999_999_999_999 → `"999999999999"`
+  with the trailing six digits dimmed.
 - `format::time`: fixed `SystemTime` epoch → expected ISO string. Test that
   `T` and `Z` get the dim style attached.
 - `sort`: natural-order ordering across a fixture name list; verify dirs-first

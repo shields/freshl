@@ -201,11 +201,12 @@ Drawing from the above, the design `freshl` commits to:
    year, or in a chat log shared by a colleague three time zones away.
    The `T` separator and `Z` suffix are rendered dim; the digits get
    full contrast, so the eye lands on the part that varies.
-6. **Raw byte counts**, grouped in clusters of six digits from the
-   right separated by underscores (e.g. `12_345678` for an 8-digit
-   count, `1234_567890` for a 10-digit one). Right-aligned in the
-   column — magnitude reads from how far left the number starts and
-   how many underscore groups it has, without needing color.
+6. **Raw byte counts**, emitted as a plain integer (copy/paste works,
+   no separator to strip). Digits past the leading six-digit-aligned
+   group are dimmed (e.g. `12345678` → `12` bright, `345678` dim;
+   `1234567890` → `1234` bright, `567890` dim), so the megabyte
+   boundary is visible without altering the text. Right-aligned in
+   the column.
 7. **Symlinks** displayed on the same row as `name → target`, with the
    arrow and target distinctly colored (and dim/red if the target is
    missing).
@@ -274,11 +275,11 @@ the example is inside a repo; `T` and `Z` would be dimmed in a real
 terminal):
 
 ```
-d 755  2 shields staff      4096 2026-05-14T18:23:11Z M  src
-- 644  1 shields staff      4567 2026-05-15T09:00:00Z  M README.md
-l 777  1 shields staff        45 2026-05-10T14:00:00Z ✓  bin → /usr/local/bin
-- 644  1 shields staff 12_345678 2026-05-12T07:21:00Z !! node_modules.tar
-- 644  1 shields staff         0 2026-05-15T11:02:00Z ?? .DS_Store
+d 755  2 shields staff     4096 2026-05-14T18:23:11Z M  src
+- 644  1 shields staff     4567 2026-05-15T09:00:00Z  M README.md
+l 777  1 shields staff       45 2026-05-10T14:00:00Z ✓  bin → /usr/local/bin
+- 644  1 shields staff 12345678 2026-05-12T07:21:00Z !! node_modules.tar
+- 644  1 shields staff        0 2026-05-15T11:02:00Z ?? .DS_Store
 ```
 
 Reading the git column: `src/` is staged-modified (`M ` = modified

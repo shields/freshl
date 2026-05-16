@@ -572,3 +572,16 @@ fn bundled_short_flag_cluster_parses_and_lists() {
     let (code, _out, _err) = run_args(&["-rSt", dir.path().to_str().unwrap()]);
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
 }
+
+#[test]
+fn directory_flag_lists_dir_as_single_row() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("inside"), b"x").unwrap();
+    let (code, out, _err) = run_args(&["-d", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert_eq!(out.lines().count(), 1, "expected one row: {out}");
+    assert!(
+        !out.contains("inside"),
+        "should not expand directory: {out}"
+    );
+}

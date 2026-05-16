@@ -7,6 +7,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 pub mod args;
 pub mod case;
@@ -32,6 +33,10 @@ struct Caches {
     sensitivity: DetectorCache<ProbeDetector>,
     snapshots: SnapshotCache,
     palette: Palette,
+    /// Captured once per invocation so every row's mtime is dimmed against the
+    /// same reference point — no skew if a long listing crosses a minute/hour
+    /// boundary mid-render.
+    now: SystemTime,
 }
 
 impl Caches {
@@ -41,6 +46,7 @@ impl Caches {
             sensitivity: DetectorCache::new(ProbeDetector),
             snapshots: SnapshotCache::new(),
             palette: Palette::from_env(),
+            now: SystemTime::now(),
         }
     }
 }
@@ -93,7 +99,9 @@ fn list(
     // Split into a batch of files and a list of directories. Files render
     // together so column widths span all file arguments (matching `ls -l
     // file1 file2 …`); each directory then renders as its own block with
-    // its own widths.
+    // its own widths. With -d, directories are not expanded — they all go
+    // into the files batch so they render as plain rows alongside any file
+    // arguments.
     let mut files: Vec<Entry> = Vec::new();
     let mut dirs: Vec<Entry> = Vec::new();
     for target in targets {
@@ -103,7 +111,7 @@ fn list(
                 // row reads `… /etc/passwd`, not just `passwd`, and so the
                 // dir labels under -R / multi-target match what was typed.
                 entry.name = target.as_os_str().to_os_string();
-                if entry.kind == EntryKind::Directory {
+                if entry.kind == EntryKind::Directory && !options.directory {
                     dirs.push(entry);
                 } else {
                     files.push(entry);
@@ -194,7 +202,14 @@ fn list_directory(
     };
     sort::sort_with(&mut entries, sense, options.sort_key, options.reverse);
     let snapshot = caches.snapshots.for_target(target);
-    render_entries(stdout, &entries, &mut caches.owners, &caches.palette, snapshot)?;
+    render_entries(
+        stdout,
+        &entries,
+        &mut caches.owners,
+        &caches.palette,
+        snapshot,
+        caches.now,
+    )?;
     Ok(report_listing_errors(stderr, &listing.errors))
 }
 
@@ -275,7 +290,14 @@ fn list_recursive(
                 to_push.push(entry.path.clone());
             }
         }
-        render_entries(stdout, &entries, &mut caches.owners, &caches.palette, snapshot)?;
+        render_entries(
+            stdout,
+            &entries,
+            &mut caches.owners,
+            &caches.palette,
+            snapshot,
+            caches.now,
+        )?;
         had_error |= report_listing_errors(stderr, &listing.errors);
         // Push in reverse so the first sorted subdir pops next: depth-first
         // in the order rendered, matching GNU `ls -R`.
@@ -305,10 +327,11 @@ fn render_entries(
     owners: &mut OwnerCache<SystemDirectory>,
     palette: &Palette,
     snapshot: Option<&Snapshot>,
+    now: SystemTime,
 ) -> Result<(), Error> {
     let mut rows: Vec<Row> = entries
         .iter()
-        .map(|e| build_row(e, owners, palette))
+        .map(|e| build_row(e, owners, palette, now))
         .collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
         enrich_row(row, entry, palette, snapshot);
@@ -331,8 +354,9 @@ fn render_files(
     // borrows at once, then render everything with shared widths.
     let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
     let mut any_git = false;
+    let now = caches.now;
     for entry in entries {
-        let mut row = build_row(entry, &mut caches.owners, &caches.palette);
+        let mut row = build_row(entry, &mut caches.owners, &caches.palette, now);
         let snap = caches.snapshots.for_target(&entry.path);
         if snap.is_some() {
             any_git = true;
@@ -1126,6 +1150,69 @@ mod tests {
         assert!(
             text.contains('A'),
             "expected git column for staged add: {text}"
+        );
+    }
+
+    #[test]
+    fn directory_flag_lists_directory_itself_not_contents() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("inside"), b"x").unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-d", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1, "expected one row: {text}");
+        assert!(text.contains(dir.path().to_str().unwrap()));
+        assert!(!text.contains("inside"), "should not list contents: {text}");
+    }
+
+    #[test]
+    fn directory_flag_with_recursive_does_not_recurse() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("deep"), b"x").unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-dR", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 1, "expected one row: {text}");
+        assert!(!text.contains("deep"), "must not recurse with -d: {text}");
+        assert!(!text.contains("sub"), "must not list children: {text}");
+    }
+
+    #[test]
+    fn directory_flag_mixes_files_and_dirs_in_one_block() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        let file = dir.path().join("file");
+        fs::create_dir(&sub).unwrap();
+        fs::write(&file, b"x").unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-d", sub.to_str().unwrap(), file.to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 2, "expected two rows: {text}");
+        // No `<path>:` label lines under -d — both args render as plain rows
+        // with shared widths, like a multi-file `ls -l`.
+        assert!(
+            !text.lines().any(|l| l.ends_with(':')),
+            "no labels expected: {text}"
         );
     }
 }

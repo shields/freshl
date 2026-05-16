@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::time::SystemTime;
 
 use anstyle::{Effects, Style};
 
@@ -58,6 +59,7 @@ pub fn build_row<D: UserDirectory>(
     entry: &Entry,
     owners: &mut OwnerCache<D>,
     palette: &Palette,
+    now: SystemTime,
 ) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
     let (size, size_width) = match entry.kind {
@@ -79,7 +81,7 @@ pub fn build_row<D: UserDirectory>(
         dim_group,
         size,
         size_width,
-        mtime: time::format_time_styled(entry.mtime, dim),
+        mtime: time::format_time_styled(entry.mtime, now, dim),
         git: None,
         name: name::format_name(palette, entry, false, false),
     }
@@ -206,7 +208,7 @@ mod tests {
             e.kind = kind;
             e.size = 0;
             e.rdev = rdev;
-            let row = build_row(&e, &mut owners, &palette);
+            let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
             assert_eq!(row.size, expected);
             assert_eq!(row.size_width, expected.len());
             assert_eq!(row.kind, kind_char);
@@ -217,7 +219,7 @@ mod tests {
     fn build_row_populates_basic_fields() {
         let mut owners = OwnerCache::new(Fixed);
         let palette = Palette::empty();
-        let row = build_row(&entry("hi"), &mut owners, &palette);
+        let row = build_row(&entry("hi"), &mut owners, &palette, SystemTime::UNIX_EPOCH);
         assert_eq!(row.kind, ' ');
         assert_eq!(row.mode, "644");
         assert!(row.dim_mode);
@@ -227,7 +229,8 @@ mod tests {
         assert_eq!(row.group, "staff");
         assert!(row.dim_group);
         assert_eq!(row.size, "1234");
-        assert!(row.mtime.contains("1970-01-01"));
+        assert!(row.mtime.contains("1970-01-"));
+        assert!(row.mtime.contains("00:00:00"));
     }
 
     #[test]
@@ -236,7 +239,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.mode = 0o100_600;
-        let row = build_row(&e, &mut owners, &palette);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
         assert_eq!(row.mode, "600");
         assert!(!row.dim_mode);
     }
@@ -247,7 +250,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.nlink = 2;
-        let row = build_row(&e, &mut owners, &palette);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
         assert_eq!(row.nlink, "2");
         assert!(!row.dim_nlink);
     }
@@ -258,7 +261,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.gid = 30;
-        let row = build_row(&e, &mut owners, &palette);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
         assert!(!row.dim_group);
     }
 
@@ -275,7 +278,7 @@ mod tests {
         }
         let mut owners = OwnerCache::new(NoUser);
         let palette = Palette::empty();
-        let row = build_row(&entry("hi"), &mut owners, &palette);
+        let row = build_row(&entry("hi"), &mut owners, &palette, SystemTime::UNIX_EPOCH);
         assert!(!row.dim_group);
     }
 
@@ -286,7 +289,7 @@ mod tests {
         let mut e = entry("d");
         e.kind = EntryKind::Directory;
         e.mode = 0o040_755;
-        let row = build_row(&e, &mut owners, &palette);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
         assert_eq!(row.kind, 'd');
         assert_eq!(row.mode, "755");
         assert!(row.dim_mode);

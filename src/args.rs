@@ -14,6 +14,10 @@ pub struct ListOptions {
     ///   2 — descend into everything
     /// Saturates at 2 (a third `u` is silently treated as 2).
     pub unrestricted: u8,
+    /// `-d`: render each path as a single row instead of expanding
+    /// directories. Suppresses `-R` for the same reason GNU `ls` does
+    /// (the descent is the thing `-d` opts out of).
+    pub directory: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +49,7 @@ Options:
   -r         Reverse the resulting order. Directories still group first.
   -u         Recurse into gitignored directories (with -R). Repeat (-uu) to
              also recurse into hidden directories.
+  -d         List directories themselves, not their contents. Suppresses -R.
   -h, --help     Print this help.
       --version  Print version.
       --        Treat following arguments as paths.
@@ -95,6 +100,7 @@ where
                     b't' => options.sort_key = SortKey::Time,
                     b'r' => options.reverse = true,
                     b'u' => options.unrestricted = options.unrestricted.saturating_add(1).min(2),
+                    b'd' => options.directory = true,
                     _ => {
                         return Err(ArgError {
                             message: format!("unknown option: {}", arg.to_string_lossy()),
@@ -335,6 +341,29 @@ mod tests {
     #[test]
     fn h_in_cluster_short_circuits_to_help() {
         assert_eq!(parse(args(&["-Rh"])), Ok(Action::Help));
+    }
+
+    #[test]
+    fn directory_short_flag_sets_directory() {
+        assert_eq!(
+            parse(args(&["-d"])),
+            Ok(list_with(ListOptions {
+                directory: true,
+                ..ListOptions::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn directory_bundles_with_other_flags() {
+        assert_eq!(
+            parse(args(&["-dR"])),
+            Ok(list_with(ListOptions {
+                directory: true,
+                recursive: true,
+                ..ListOptions::default()
+            }))
+        );
     }
 
     #[test]

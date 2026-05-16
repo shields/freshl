@@ -518,7 +518,8 @@ mod tests {
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("file"));
-        assert!(text.starts_with(" 6") || text.contains("\n 6"));
+        // Match kind+mode bytes only; the row may include surrounding ANSI escapes.
+        assert!(text.contains(" 644"));
     }
 
     #[test]

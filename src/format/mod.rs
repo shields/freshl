@@ -26,9 +26,22 @@ pub struct ColumnWidths {
 pub struct Row {
     pub kind: char,
     pub mode: String,
+    /// Wrap kind+mode in dim escapes at render time when this row's perms
+    /// are the boring default (regular/644, dir/755, symlink/755) — keeps
+    /// the eye on rows with anything unusual.
+    pub dim_mode: bool,
     pub nlink: String,
+    /// Wrap `nlink` in dim escapes at render time when the count is 1 — the
+    /// overwhelming default for regular files, so dimming it lets the eye
+    /// catch hardlinked entries.
+    pub dim_nlink: bool,
     pub owner: String,
     pub group: String,
+    /// Wrap the group column in dim escapes at render time when the gid is
+    /// the owner's primary group from passwd — that column then carries no
+    /// extra information, so dimming it lets the eye catch rows where the
+    /// file's group differs from the owner's default.
+    pub dim_group: bool,
     pub size: String,
     /// Visible digit count for `size`. Tracked separately because `size`
     /// carries ANSI dim escapes whose bytes would skew `chars().count()`.
@@ -51,12 +64,19 @@ pub fn build_row<D: UserDirectory>(
         EntryKind::CharDevice | EntryKind::BlockDevice => size::format_rdev(entry.rdev),
         _ => size::format_size(entry.size, dim),
     };
+    let kind = entry.kind.type_char();
+    let mode = perms::format_perms(entry.mode);
+    let dim_mode = perms::is_default(kind, &mode);
+    let dim_group = owners.gid_is_primary(entry.uid, entry.gid);
     Row {
-        kind: entry.kind.type_char(),
-        mode: perms::format_perms(entry.mode),
+        kind,
+        mode,
+        dim_mode,
         nlink: entry.nlink.to_string(),
+        dim_nlink: entry.nlink == 1,
         owner: owners.user(entry.uid).to_string_lossy().into_owned(),
         group: owners.group(entry.gid).to_string_lossy().into_owned(),
+        dim_group,
         size,
         size_width,
         mtime: time::format_time_styled(entry.mtime, dim),
@@ -87,14 +107,35 @@ fn max_width(rows: &[Row], field: impl Fn(&Row) -> &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Wrap `body`'s output in dim-open/reset escapes when `on` is true.
+fn wrap_dim(out: &mut Vec<u8>, on: bool, dim: Style, body: impl FnOnce(&mut Vec<u8>)) {
+    if on {
+        let _ = write!(out, "{dim}");
+    }
+    body(out);
+    if on {
+        let _ = write!(out, "{}", dim.render_reset());
+    }
+}
+
 #[must_use]
 pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(row.name.len() + 96);
-    let _ = write!(out, "{}", row.kind);
-    let _ = write!(out, "{:>w$} ", row.mode, w = widths.mode);
-    let _ = write!(out, "{:>w$} ", row.nlink, w = widths.nlink);
+    let dim = Style::new().effects(Effects::DIMMED);
+    wrap_dim(&mut out, row.dim_mode, dim, |out| {
+        let _ = write!(out, "{}", row.kind);
+        let _ = write!(out, "{:>w$}", row.mode, w = widths.mode);
+    });
+    out.push(b' ');
+    wrap_dim(&mut out, row.dim_nlink, dim, |out| {
+        let _ = write!(out, "{:>w$}", row.nlink, w = widths.nlink);
+    });
+    out.push(b' ');
     let _ = write!(out, "{:<w$} ", row.owner, w = widths.owner);
-    let _ = write!(out, "{:<w$} ", row.group, w = widths.group);
+    wrap_dim(&mut out, row.dim_group, dim, |out| {
+        let _ = write!(out, "{:<w$}", row.group, w = widths.group);
+    });
+    out.push(b' ');
     // Size column carries ANSI escapes, so pad by visual width rather than
     // letting `{:>w$}` count escape bytes as visible characters.
     let pad = widths.size.saturating_sub(row.size_width);
@@ -118,15 +159,19 @@ mod tests {
     use super::{ColumnWidths, Row, build_row, compute_widths, render_row};
     use crate::entry::{Entry, EntryKind};
     use crate::format::palette::Palette;
-    use crate::owner::{OwnerCache, UserDirectory};
+    use crate::owner::{OwnerCache, UserDirectory, UserRecord};
+    use anstyle::{Effects, Style};
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::SystemTime;
 
     struct Fixed;
     impl UserDirectory for Fixed {
-        fn user_name(&self, _uid: u32) -> Option<OsString> {
-            Some(OsString::from("alice"))
+        fn lookup_user(&self, _uid: u32) -> Option<UserRecord> {
+            Some(UserRecord {
+                name: OsString::from("alice"),
+                primary_gid: 20,
+            })
         }
         fn group_name(&self, _gid: u32) -> Option<OsString> {
             Some(OsString::from("staff"))
@@ -175,11 +220,76 @@ mod tests {
         let row = build_row(&entry("hi"), &mut owners, &palette);
         assert_eq!(row.kind, ' ');
         assert_eq!(row.mode, "644");
+        assert!(row.dim_mode);
         assert_eq!(row.nlink, "1");
+        assert!(row.dim_nlink);
         assert_eq!(row.owner, "alice");
         assert_eq!(row.group, "staff");
+        assert!(row.dim_group);
         assert_eq!(row.size, "1234");
         assert!(row.mtime.contains("1970-01-01"));
+    }
+
+    #[test]
+    fn build_row_clears_dim_mode_for_unusual_perms() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let mut e = entry("hi");
+        e.mode = 0o100_600;
+        let row = build_row(&e, &mut owners, &palette);
+        assert_eq!(row.mode, "600");
+        assert!(!row.dim_mode);
+    }
+
+    #[test]
+    fn build_row_clears_dim_nlink_for_hardlinked_entry() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let mut e = entry("hi");
+        e.nlink = 2;
+        let row = build_row(&e, &mut owners, &palette);
+        assert_eq!(row.nlink, "2");
+        assert!(!row.dim_nlink);
+    }
+
+    #[test]
+    fn build_row_clears_dim_group_when_gid_is_not_primary() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let mut e = entry("hi");
+        e.gid = 30;
+        let row = build_row(&e, &mut owners, &palette);
+        assert!(!row.dim_group);
+    }
+
+    #[test]
+    fn build_row_clears_dim_group_when_owner_unknown() {
+        struct NoUser;
+        impl UserDirectory for NoUser {
+            fn lookup_user(&self, _uid: u32) -> Option<UserRecord> {
+                None
+            }
+            fn group_name(&self, _gid: u32) -> Option<OsString> {
+                Some(OsString::from("staff"))
+            }
+        }
+        let mut owners = OwnerCache::new(NoUser);
+        let palette = Palette::empty();
+        let row = build_row(&entry("hi"), &mut owners, &palette);
+        assert!(!row.dim_group);
+    }
+
+    #[test]
+    fn build_row_sets_dim_mode_for_default_directory() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let mut e = entry("d");
+        e.kind = EntryKind::Directory;
+        e.mode = 0o040_755;
+        let row = build_row(&e, &mut owners, &palette);
+        assert_eq!(row.kind, 'd');
+        assert_eq!(row.mode, "755");
+        assert!(row.dim_mode);
     }
 
     #[test]
@@ -188,9 +298,12 @@ mod tests {
             Row {
                 kind: '-',
                 mode: "644".into(),
+                dim_mode: false,
                 nlink: "1".into(),
+                dim_nlink: false,
                 owner: "x".into(),
                 group: "staff".into(),
+                dim_group: false,
                 size: "1".into(),
                 size_width: 1,
                 mtime: "2026".into(),
@@ -200,9 +313,12 @@ mod tests {
             Row {
                 kind: '-',
                 mode: "4755".into(),
+                dim_mode: false,
                 nlink: "99".into(),
+                dim_nlink: false,
                 owner: "longer".into(),
                 group: "g".into(),
+                dim_group: false,
                 size: "1234".into(),
                 size_width: 4,
                 mtime: "2026".into(),
@@ -230,9 +346,12 @@ mod tests {
         let row = Row {
             kind: 'd',
             mode: "755".into(),
+            dim_mode: false,
             nlink: "2".into(),
+            dim_nlink: false,
             owner: "alice".into(),
             group: "staff".into(),
+            dim_group: false,
             size: "0".into(),
             size_width: 1,
             mtime: "2026-05-15T11:02:00Z".into(),
@@ -252,13 +371,156 @@ mod tests {
     }
 
     #[test]
+    fn render_row_wraps_kind_and_mode_in_dim_when_flagged() {
+        let row = Row {
+            kind: 'd',
+            mode: "755".into(),
+            dim_mode: true,
+            nlink: "2".into(),
+            dim_nlink: false,
+            owner: "alice".into(),
+            group: "staff".into(),
+            dim_group: false,
+            size: "0".into(),
+            size_width: 1,
+            mtime: "2026-05-15T11:02:00Z".into(),
+            git: None,
+            name: b"src".to_vec(),
+        };
+        let widths = ColumnWidths {
+            mode: 4,
+            nlink: 2,
+            owner: 7,
+            group: 5,
+            size: 9,
+        };
+        let s = render_row(&row, widths, 0);
+        let dim = Style::new().effects(Effects::DIMMED);
+        let open = format!("{dim}");
+        let close = format!("{}", dim.render_reset());
+        let expected = format!("{open}d 755{close} ");
+        assert!(
+            s.windows(expected.len())
+                .any(|w| w == expected.as_bytes()),
+            "row should open dim before 'd', close after '755': {s:?}",
+        );
+    }
+
+    #[test]
+    fn render_row_omits_dim_escapes_when_flag_unset() {
+        let row = Row {
+            kind: 'd',
+            mode: "755".into(),
+            dim_mode: false,
+            nlink: "2".into(),
+            dim_nlink: false,
+            owner: "alice".into(),
+            group: "staff".into(),
+            dim_group: false,
+            size: "0".into(),
+            size_width: 1,
+            mtime: "2026-05-15T11:02:00Z".into(),
+            git: None,
+            name: b"src".to_vec(),
+        };
+        let widths = ColumnWidths {
+            mode: 3,
+            nlink: 1,
+            owner: 5,
+            group: 5,
+            size: 1,
+        };
+        let s = render_row(&row, widths, 0);
+        let dim = Style::new().effects(Effects::DIMMED);
+        let open = format!("{dim}");
+        assert!(
+            !s.windows(open.len()).any(|w| w == open.as_bytes()),
+            "no dim escape expected: {s:?}",
+        );
+    }
+
+    #[test]
+    fn render_row_wraps_nlink_in_dim_when_flagged() {
+        let row = Row {
+            kind: '-',
+            mode: "644".into(),
+            dim_mode: false,
+            nlink: "1".into(),
+            dim_nlink: true,
+            owner: "alice".into(),
+            group: "staff".into(),
+            dim_group: false,
+            size: "0".into(),
+            size_width: 1,
+            mtime: "2026-05-15T11:02:00Z".into(),
+            git: None,
+            name: b"src".to_vec(),
+        };
+        let widths = ColumnWidths {
+            mode: 3,
+            nlink: 2,
+            owner: 5,
+            group: 5,
+            size: 1,
+        };
+        let s = render_row(&row, widths, 0);
+        let dim = Style::new().effects(Effects::DIMMED);
+        let open = format!("{dim}");
+        let close = format!("{}", dim.render_reset());
+        let expected = format!("{open} 1{close} ");
+        assert!(
+            s.windows(expected.len())
+                .any(|w| w == expected.as_bytes()),
+            "row should open dim before padded nlink, close after: {s:?}",
+        );
+    }
+
+    #[test]
+    fn render_row_wraps_group_in_dim_when_flagged() {
+        let row = Row {
+            kind: '-',
+            mode: "644".into(),
+            dim_mode: false,
+            nlink: "1".into(),
+            dim_nlink: false,
+            owner: "alice".into(),
+            group: "staff".into(),
+            dim_group: true,
+            size: "0".into(),
+            size_width: 1,
+            mtime: "2026-05-15T11:02:00Z".into(),
+            git: None,
+            name: b"src".to_vec(),
+        };
+        let widths = ColumnWidths {
+            mode: 3,
+            nlink: 1,
+            owner: 5,
+            group: 5,
+            size: 1,
+        };
+        let s = render_row(&row, widths, 0);
+        let dim = Style::new().effects(Effects::DIMMED);
+        let open = format!("{dim}");
+        let close = format!("{}", dim.render_reset());
+        let expected = format!("{open}staff{close} ");
+        assert!(
+            s.windows(expected.len()).any(|w| w == expected.as_bytes()),
+            "row should open dim before group, close after: {s:?}",
+        );
+    }
+
+    #[test]
     fn render_row_emits_git_column_when_width_set() {
         let mut row = Row {
             kind: '-',
             mode: "644".into(),
+            dim_mode: false,
             nlink: "1".into(),
+            dim_nlink: false,
             owner: "alice".into(),
             group: "staff".into(),
+            dim_group: false,
             size: "0".into(),
             size_width: 1,
             mtime: "2026-05-15T11:02:00Z".into(),
@@ -285,9 +547,12 @@ mod tests {
         let row = Row {
             kind: '-',
             mode: "644".into(),
+            dim_mode: false,
             nlink: "1".into(),
+            dim_nlink: false,
             owner: "alice".into(),
             group: "staff".into(),
+            dim_group: false,
             size: "0".into(),
             size_width: 1,
             mtime: "2026-05-15T11:02:00Z".into(),

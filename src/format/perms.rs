@@ -8,6 +8,18 @@ pub fn format_perms(mode: u32) -> String {
     }
 }
 
+// The type+mode column is dimmed when it carries no information: a regular
+// file at 644, a directory at 755, or a symlink at the platform's default
+// (777 on Linux, 755 on macOS/BSD). Any other combination — odd perms,
+// setuid, world-writable — stays bright so the eye lands on it.
+#[must_use]
+pub fn is_default(kind: char, mode: &str) -> bool {
+    matches!(
+        (kind, mode),
+        (' ', "644") | ('d', "755") | ('l', "755" | "777"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::format_perms;
@@ -33,5 +45,34 @@ mod tests {
     fn ignores_file_type_bits() {
         assert_eq!(format_perms(0o100_644), "644");
         assert_eq!(format_perms(0o040_755), "755");
+    }
+
+    #[test]
+    fn is_default_matches_boring_combinations() {
+        assert!(super::is_default(' ', "644"));
+        assert!(super::is_default('d', "755"));
+        // Symlink defaults differ by platform: macOS/BSD writes 755, Linux 777.
+        assert!(super::is_default('l', "755"));
+        assert!(super::is_default('l', "777"));
+    }
+
+    #[test]
+    fn is_default_rejects_anything_else() {
+        // Wrong perms for the type.
+        assert!(!super::is_default(' ', "755"));
+        assert!(!super::is_default(' ', "777"));
+        assert!(!super::is_default('d', "644"));
+        assert!(!super::is_default('d', "777"));
+        assert!(!super::is_default('l', "644"));
+        // Non-default perms.
+        assert!(!super::is_default(' ', "600"));
+        assert!(!super::is_default('d', "700"));
+        assert!(!super::is_default(' ', "4755"));
+        // Other entry kinds never qualify.
+        for k in ['c', 'b', 'p', 's', '?'] {
+            assert!(!super::is_default(k, "644"));
+            assert!(!super::is_default(k, "755"));
+            assert!(!super::is_default(k, "777"));
+        }
     }
 }

@@ -1,0 +1,24 @@
+[package]
+name = "freshl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Modern ls replacement with git awareness and ISO 8601 UTC timestamps"
+publish = false
+repository = "https://github.com/shields/freshl"
+keywords = ["cli", "ls", "filesystem", "git"]
+categories = ["command-line-utilities", "filesystem"]
+
+[dependencies]
+anstream = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+multiple-crate-versions = "allow"

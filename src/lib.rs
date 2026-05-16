@@ -361,8 +361,7 @@ mod tests {
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("file"));
-        // Row layout starts with the kind char + space.
-        assert!(text.starts_with("- ") || text.contains("\n- "));
+        assert!(text.starts_with(" 6") || text.contains("\n 6"));
     }
 
     #[test]

@@ -78,7 +78,7 @@ fn max_width(rows: &[Row], field: impl Fn(&Row) -> &str) -> usize {
 #[must_use]
 pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(row.name.len() + 96);
-    let _ = write!(out, "{} ", row.kind);
+    let _ = write!(out, "{}", row.kind);
     let _ = write!(out, "{:>w$} ", row.mode, w = widths.mode);
     let _ = write!(out, "{:>w$} ", row.nlink, w = widths.nlink);
     let _ = write!(out, "{:<w$} ", row.owner, w = widths.owner);
@@ -139,7 +139,7 @@ mod tests {
     fn build_row_populates_basic_fields() {
         let mut owners = OwnerCache::new(Fixed);
         let row = build_row(&entry("hi"), &mut owners);
-        assert_eq!(row.kind, '-');
+        assert_eq!(row.kind, ' ');
         assert_eq!(row.mode, "644");
         assert_eq!(row.nlink, "1");
         assert_eq!(row.owner, "alice");
@@ -213,7 +213,7 @@ mod tests {
             size: 9,
         };
         let s = render_row(&row, widths, 0);
-        assert!(s.starts_with(b"d  755  2 alice   staff "));
+        assert!(s.starts_with(b"d 755  2 alice   staff "));
         assert!(s.ends_with(b"src"));
     }
 

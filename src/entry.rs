@@ -19,7 +19,7 @@ impl EntryKind {
     pub const fn type_char(self) -> char {
         match self {
             Self::Directory => 'd',
-            Self::RegularFile => '-',
+            Self::RegularFile => ' ',
             Self::Symlink => 'l',
             Self::CharDevice => 'c',
             Self::BlockDevice => 'b',
@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn type_char_covers_all_kinds() {
         assert_eq!(EntryKind::Directory.type_char(), 'd');
-        assert_eq!(EntryKind::RegularFile.type_char(), '-');
+        assert_eq!(EntryKind::RegularFile.type_char(), ' ');
         assert_eq!(EntryKind::Symlink.type_char(), 'l');
         assert_eq!(EntryKind::CharDevice.type_char(), 'c');
         assert_eq!(EntryKind::BlockDevice.type_char(), 'b');

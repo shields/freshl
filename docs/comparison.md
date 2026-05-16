@@ -275,11 +275,11 @@ the example is inside a repo; `T` and `Z` would be dimmed in a real
 terminal):
 
 ```
-d 755  2 shields staff     4096 2026-05-14T18:23:11Z M  src
-- 644  1 shields staff     4567 2026-05-15T09:00:00Z  M README.md
-l 777  1 shields staff       45 2026-05-10T14:00:00Z ✓  bin → /usr/local/bin
-- 644  1 shields staff 12345678 2026-05-12T07:21:00Z !! node_modules.tar
-- 644  1 shields staff        0 2026-05-15T11:02:00Z ?? .DS_Store
+d755  2 shields staff     4096 2026-05-14T18:23:11Z M  src
+ 644  1 shields staff     4567 2026-05-15T09:00:00Z  M README.md
+l777  1 shields staff       45 2026-05-10T14:00:00Z ✓  bin → /usr/local/bin
+ 644  1 shields staff 12345678 2026-05-12T07:21:00Z !! node_modules.tar
+ 644  1 shields staff        0 2026-05-15T11:02:00Z ?? .DS_Store
 ```
 
 Reading the git column: `src/` is staged-modified (`M ` = modified

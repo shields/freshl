@@ -115,6 +115,9 @@ impl Snapshot {
         let abs = std::path::absolute(path).ok();
         let candidate: &Path = abs.as_deref().unwrap_or(path);
         if let Ok(rel) = candidate.strip_prefix(&self.root) {
+            // `std::path::absolute` strips all `.` components (both leading
+            // and interior) on POSIX, so we only have to watch for `..`,
+            // which it preserves and which would mis-key the status lookup.
             let has_dotdot = rel
                 .components()
                 .any(|c| matches!(c, Component::ParentDir));
@@ -122,8 +125,27 @@ impl Snapshot {
                 return Some(rel.to_path_buf());
             }
         }
-        let canon = std::fs::canonicalize(path).ok()?;
-        canon.strip_prefix(&self.root).ok().map(Path::to_path_buf)
+        // Canonicalise the parent and re-attach the leaf so directory
+        // symlinks (e.g. macOS `/var` → `/private/var`) and `..` components
+        // resolve, but a symlinked entry isn't dereferenced into its target.
+        // When the path has no separable parent+name (single-component, `.`,
+        // `..`, `/`), canonicalising the whole path is safe — those forms
+        // can't themselves be the symlinked entry we're trying to look up.
+        let resolved = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => {
+                let to_canon: &Path = if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                };
+                std::fs::canonicalize(to_canon).ok()?.join(name)
+            }
+            _ => std::fs::canonicalize(path).ok()?,
+        };
+        resolved
+            .strip_prefix(&self.root)
+            .ok()
+            .map(Path::to_path_buf)
     }
 }
 
@@ -720,6 +742,68 @@ mod tests {
         };
         assert_eq!(
             snap.lookup(Path::new("/repo/missing/../also-missing")),
+            PorcelainCode::CLEAN,
+        );
+    }
+
+    #[test]
+    fn lookup_preserves_leaf_symlink_via_parent_canonicalisation() {
+        // The canonicalize fallback must NOT dereference a leaf symlink — if
+        // it did, a symlinked entry would look up under its target's path
+        // instead of its own. Build a workdir reached through a directory
+        // symlink and confirm `lookup` resolves the leaf via the symlink's
+        // own name.
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        std::os::unix::fs::symlink("/dev/null", canonical.join("entry")).unwrap();
+        let link_dir = dir.path().join("via_link");
+        std::os::unix::fs::symlink(&canonical, &link_dir).unwrap();
+
+        let mut statuses = HashMap::new();
+        statuses.insert(PathBuf::from("entry"), PorcelainCode::TYPE_CHANGE_WORKTREE);
+        let snap = Snapshot {
+            root: canonical,
+            statuses,
+        };
+        // Path is reached via the directory symlink; lexical strip_prefix
+        // fails because link_dir's path differs from the canonical root.
+        // The parent-canonicalisation fallback must resolve `via_link` to
+        // the real workdir AND preserve the `entry` leaf without following
+        // its symlink to `/dev/null`.
+        assert_eq!(
+            snap.lookup(&link_dir.join("entry")),
+            PorcelainCode::TYPE_CHANGE_WORKTREE,
+        );
+    }
+
+    #[test]
+    fn lookup_handles_single_component_relative_path() {
+        // `Path::new("file").parent()` is `Some("")`; the fallback must
+        // substitute "." so canonicalize doesn't choke on the empty path.
+        // Use a root that doesn't include cwd so the lexical branch fails
+        // and the parent-canonicalisation fallback fires; the test then
+        // just confirms `relativize` does not panic and returns CLEAN.
+        let snap = Snapshot {
+            root: PathBuf::from("/definitely/not/the/cwd"),
+            statuses: HashMap::new(),
+        };
+        assert_eq!(snap.lookup(Path::new("solo")), PorcelainCode::CLEAN);
+    }
+
+    #[test]
+    fn lookup_handles_path_with_no_file_name() {
+        // `Path::new("/").file_name()` is `None`. The fallback must
+        // canonicalise the whole path rather than panic via `?`.
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let snap = Snapshot {
+            root: canonical,
+            statuses: HashMap::new(),
+        };
+        // A bare `..` has no file_name; lookup must not panic and must
+        // return CLEAN (the parent dir of the tempdir is outside the root).
+        assert_eq!(
+            snap.lookup(Path::new("..")),
             PorcelainCode::CLEAN,
         );
     }

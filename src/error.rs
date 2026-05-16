@@ -1,11 +1,13 @@
 use std::fmt;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Debug)]
 pub enum Error {
     Usage(String),
+    StdoutIo(std::io::Error),
     Io {
-        path: String,
+        path: PathBuf,
         source: std::io::Error,
     },
 }
@@ -15,7 +17,7 @@ impl Error {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Self::Usage(_) => ExitCode::from(2),
-            Self::Io { .. } => ExitCode::from(1),
+            Self::StdoutIo(_) | Self::Io { .. } => ExitCode::from(1),
         }
     }
 }
@@ -24,7 +26,8 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(msg) => write!(f, "freshl: {msg}"),
-            Self::Io { path, source } => write!(f, "freshl: {path}: {source}"),
+            Self::StdoutIo(source) => write!(f, "freshl: <stdout>: {source}"),
+            Self::Io { path, source } => write!(f, "freshl: {}: {source}", path.display()),
         }
     }
 }
@@ -32,6 +35,7 @@ impl fmt::Display for Error {
 #[cfg(test)]
 mod tests {
     use super::Error;
+    use std::path::PathBuf;
     use std::process::ExitCode;
 
     fn code_byte(code: ExitCode) -> String {
@@ -48,12 +52,21 @@ mod tests {
     #[test]
     fn io_uses_exit_code_one() {
         let err = Error::Io {
-            path: "thing".into(),
+            path: PathBuf::from("thing"),
             source: std::io::Error::other("boom"),
         };
         assert_eq!(code_byte(err.exit_code()), code_byte(ExitCode::from(1)));
         let rendered = format!("{err}");
         assert!(rendered.contains("thing"));
         assert!(rendered.contains("boom"));
+    }
+
+    #[test]
+    fn stdout_io_uses_exit_code_one_and_labels_stdout() {
+        let err = Error::StdoutIo(std::io::Error::other("write fail"));
+        assert_eq!(code_byte(err.exit_code()), code_byte(ExitCode::from(1)));
+        let rendered = format!("{err}");
+        assert!(rendered.contains("<stdout>"));
+        assert!(rendered.contains("write fail"));
     }
 }

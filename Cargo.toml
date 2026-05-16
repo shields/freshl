@@ -12,6 +12,9 @@ categories = ["command-line-utilities", "filesystem"]
 [dependencies]
 anstream = "1"
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints.rust]
 unsafe_code = "forbid"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }

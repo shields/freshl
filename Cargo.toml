@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "filesystem"]
 anstream = "1"
 anstyle = "1"
 jiff = "0.2"
+lscolors = { version = "0.21.0", default-features = false }
 uzers = "0.12"
 
 [dependencies.gix]

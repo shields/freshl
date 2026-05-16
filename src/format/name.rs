@@ -3,20 +3,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use anstyle::{AnsiColor, Color, Effects, Style};
 
-use crate::entry::{Entry, EntryKind};
-
-#[must_use]
-pub fn style_for_kind(kind: EntryKind) -> Style {
-    let color = match kind {
-        EntryKind::Directory => Some(Color::Ansi(AnsiColor::Blue)),
-        EntryKind::Symlink => Some(Color::Ansi(AnsiColor::Cyan)),
-        EntryKind::CharDevice | EntryKind::BlockDevice => Some(Color::Ansi(AnsiColor::Yellow)),
-        EntryKind::Fifo => Some(Color::Ansi(AnsiColor::Magenta)),
-        EntryKind::Socket => Some(Color::Ansi(AnsiColor::Green)),
-        EntryKind::RegularFile | EntryKind::Other => None,
-    };
-    color.map_or_else(Style::new, |c| Style::new().fg_color(Some(c)))
-}
+use crate::entry::Entry;
+use crate::format::palette::Palette;
 
 /// Render the styled name as raw bytes.
 ///
@@ -25,16 +13,23 @@ pub fn style_for_kind(kind: EntryKind) -> Style {
 /// rendering with the right colour on a terminal. For symlinks, the output
 /// includes a dimmed arrow and the link target.
 #[must_use]
-pub fn format_name(entry: &Entry, dim_if_ignored: bool, target_missing: bool) -> Vec<u8> {
-    let kind_style = style_for_kind(entry.kind);
+pub fn format_name(
+    palette: &Palette,
+    entry: &Entry,
+    dim_if_ignored: bool,
+    target_missing: bool,
+) -> Vec<u8> {
+    let base = palette.style_for(entry, target_missing);
     let dim = Style::new().effects(Effects::DIMMED);
     let red = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
 
     let mut out = Vec::with_capacity(entry.name.len() + 32);
     let name_style = if dim_if_ignored {
-        kind_style.effects(Effects::DIMMED)
+        // OR DIMMED onto whatever the palette already set (bold, fg, …) so the
+        // dim cue doesn't overwrite the type/extension styling.
+        base.effects(base.get_effects() | Effects::DIMMED)
     } else {
-        kind_style
+        base
     };
     let _ = write!(out, "{name_style}");
     out.extend_from_slice(entry.name.as_bytes());
@@ -42,7 +37,13 @@ pub fn format_name(entry: &Entry, dim_if_ignored: bool, target_missing: bool) ->
 
     if let Some(target) = &entry.symlink_target {
         let _ = write!(out, " {dim}→{} ", dim.render_reset());
-        let style = if target_missing { red } else { dim };
+        let style = if target_missing {
+            // Honor the user's `mi` indicator when they've set it; fall back
+            // to red so a broken link is still visually obvious.
+            palette.style_for_missing_target().unwrap_or(red)
+        } else {
+            dim
+        };
         let _ = write!(out, "{style}");
         out.extend_from_slice(target.as_os_str().as_bytes());
         let _ = write!(out, "{}", style.render_reset());
@@ -53,8 +54,9 @@ pub fn format_name(entry: &Entry, dim_if_ignored: bool, target_missing: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{format_name, style_for_kind};
+    use super::format_name;
     use crate::entry::{Entry, EntryKind};
+    use crate::format::palette::Palette;
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::SystemTime;
@@ -80,45 +82,19 @@ mod tests {
     }
 
     #[test]
-    fn style_for_directory_uses_blue() {
-        let s = style_for_kind(EntryKind::Directory);
-        assert!(format!("{s}").contains("34"));
-    }
-
-    #[test]
-    fn style_for_regular_file_is_default() {
-        let s = style_for_kind(EntryKind::RegularFile);
-        assert_eq!(format!("{s}"), String::new());
-    }
-
-    #[test]
-    fn style_for_every_kind() {
-        for k in [
-            EntryKind::Directory,
-            EntryKind::Symlink,
-            EntryKind::CharDevice,
-            EntryKind::BlockDevice,
-            EntryKind::Fifo,
-            EntryKind::Socket,
-            EntryKind::RegularFile,
-            EntryKind::Other,
-        ] {
-            let _ = style_for_kind(k);
-        }
-    }
-
-    #[test]
     fn formats_plain_file_name() {
+        let palette = Palette::empty();
         let e = entry("hello", EntryKind::RegularFile);
-        let bytes = format_name(&e, false, false);
+        let bytes = format_name(&palette, &e, false, false);
         assert!(as_lossy(&bytes).contains("hello"));
     }
 
     #[test]
     fn formats_symlink_with_arrow_and_target() {
+        let palette = Palette::empty();
         let mut e = entry("link", EntryKind::Symlink);
         e.symlink_target = Some(PathBuf::from("/usr/bin"));
-        let bytes = format_name(&e, false, false);
+        let bytes = format_name(&palette, &e, false, false);
         let s = as_lossy(&bytes);
         assert!(s.contains("link"));
         assert!(s.contains('→'));
@@ -126,28 +102,56 @@ mod tests {
     }
 
     #[test]
-    fn missing_target_uses_red() {
+    fn missing_target_uses_red_when_mi_unset() {
+        let palette = Palette::empty();
         let mut e = entry("link", EntryKind::Symlink);
         e.symlink_target = Some(PathBuf::from("nowhere"));
-        let plain = format_name(&e, false, false);
-        let red_styled = format_name(&e, false, true);
+        let plain = format_name(&palette, &e, false, false);
+        let red_styled = format_name(&palette, &e, false, true);
         assert_ne!(plain, red_styled);
-        assert!(as_lossy(&red_styled).contains("nowhere"));
+        let s = as_lossy(&red_styled);
+        assert!(s.contains("nowhere"));
+        // SGR 31 is anstyle's red; without `mi` configured the target falls
+        // back to freshl's hardcoded red.
+        assert!(s.contains("31"), "expected red SGR for missing target: {s}");
+    }
+
+    #[test]
+    fn missing_target_uses_mi_when_palette_sets_it() {
+        let palette = Palette::from_string("mi=01;33");
+        let mut e = entry("link", EntryKind::Symlink);
+        e.symlink_target = Some(PathBuf::from("nowhere"));
+        let s = as_lossy(&format_name(&palette, &e, false, true));
+        assert!(s.contains("33"), "expected mi yellow on target: {s}");
+        assert!(!s.contains("31"), "freshl red should not appear: {s}");
     }
 
     #[test]
     fn ignored_files_get_dim_style() {
+        let palette = Palette::empty();
         let e = entry("ignored", EntryKind::RegularFile);
-        let dim = format_name(&e, true, false);
-        let plain = format_name(&e, false, false);
+        let dim = format_name(&palette, &e, true, false);
+        let plain = format_name(&palette, &e, false, false);
         assert_ne!(plain, dim);
+    }
+
+    #[test]
+    fn ignored_dim_preserves_palette_styling() {
+        // With a non-empty palette, the DIMMED overlay must layer onto the
+        // base style instead of replacing it.
+        let palette = Palette::from_string("di=01;34");
+        let e = entry("d", EntryKind::Directory);
+        let dim = as_lossy(&format_name(&palette, &e, true, false));
+        assert!(dim.contains("34"), "blue fg should survive dim overlay: {dim}");
+        assert!(dim.contains('2'), "dim effect should be present: {dim}");
     }
 
     #[test]
     fn non_utf8_name_round_trips_exactly() {
         use std::os::unix::ffi::OsStringExt;
+        let palette = Palette::empty();
         let raw = vec![b'b', b'a', b'd', 0xFF, b'8'];
-        let mut e = Entry {
+        let e = Entry {
             name: OsString::from_vec(raw.clone()),
             path: PathBuf::from("bad"),
             kind: EntryKind::RegularFile,
@@ -160,8 +164,7 @@ mod tests {
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
         };
-        e.symlink_target = None;
-        let bytes = format_name(&e, false, false);
+        let bytes = format_name(&palette, &e, false, false);
         // The raw byte 0xFF must appear in the output verbatim, not as U+FFFD.
         assert!(bytes.windows(raw.len()).any(|w| w == raw.as_slice()));
     }

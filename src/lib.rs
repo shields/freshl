@@ -22,6 +22,7 @@ use args::{Action, ListOptions, parse};
 use case::{DetectorCache, ProbeDetector};
 use entry::{Entry, EntryKind};
 use error::Error;
+use format::palette::Palette;
 use format::{Row, build_row, compute_widths, render_row};
 use git::{PorcelainCode, Snapshot, SnapshotCache};
 use owner::{OwnerCache, SystemDirectory};
@@ -30,6 +31,7 @@ struct Caches {
     owners: OwnerCache<SystemDirectory>,
     sensitivity: DetectorCache<ProbeDetector>,
     snapshots: SnapshotCache,
+    palette: Palette,
 }
 
 impl Caches {
@@ -38,6 +40,7 @@ impl Caches {
             owners: OwnerCache::new(SystemDirectory),
             sensitivity: DetectorCache::new(ProbeDetector),
             snapshots: SnapshotCache::new(),
+            palette: Palette::from_env(),
         }
     }
 }
@@ -191,7 +194,7 @@ fn list_directory(
     };
     sort::sort_with(&mut entries, sense, options.sort_key, options.reverse);
     let snapshot = caches.snapshots.for_target(target);
-    render_entries(stdout, &entries, &mut caches.owners, snapshot)?;
+    render_entries(stdout, &entries, &mut caches.owners, &caches.palette, snapshot)?;
     Ok(report_listing_errors(stderr, &listing.errors))
 }
 
@@ -272,7 +275,7 @@ fn list_recursive(
                 to_push.push(entry.path.clone());
             }
         }
-        render_entries(stdout, &entries, &mut caches.owners, snapshot)?;
+        render_entries(stdout, &entries, &mut caches.owners, &caches.palette, snapshot)?;
         had_error |= report_listing_errors(stderr, &listing.errors);
         // Push in reverse so the first sorted subdir pops next: depth-first
         // in the order rendered, matching GNU `ls -R`.
@@ -300,11 +303,15 @@ fn render_entries(
     stdout: &mut dyn Write,
     entries: &[Entry],
     owners: &mut OwnerCache<SystemDirectory>,
+    palette: &Palette,
     snapshot: Option<&Snapshot>,
 ) -> Result<(), Error> {
-    let mut rows: Vec<Row> = entries.iter().map(|e| build_row(e, owners)).collect();
+    let mut rows: Vec<Row> = entries
+        .iter()
+        .map(|e| build_row(e, owners, palette))
+        .collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
-        enrich_row(row, entry, snapshot);
+        enrich_row(row, entry, palette, snapshot);
     }
     let git_width = if snapshot.is_some() {
         format::git_col::WIDTH
@@ -325,19 +332,19 @@ fn render_files(
     let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
     let mut any_git = false;
     for entry in entries {
-        let mut row = build_row(entry, &mut caches.owners);
+        let mut row = build_row(entry, &mut caches.owners, &caches.palette);
         let snap = caches.snapshots.for_target(&entry.path);
         if snap.is_some() {
             any_git = true;
         }
-        enrich_row(&mut row, entry, snap);
+        enrich_row(&mut row, entry, &caches.palette, snap);
         rows.push(row);
     }
     let git_width = if any_git { format::git_col::WIDTH } else { 0 };
     write_rows(stdout, &rows, git_width)
 }
 
-fn enrich_row(row: &mut Row, entry: &Entry, snapshot: Option<&Snapshot>) {
+fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<&Snapshot>) {
     // `Snapshot::lookup` can canonicalize the path; do it once and derive
     // both the git column and the ignored flag from the same result.
     let code = snapshot.map(|s| s.lookup(&entry.path));
@@ -347,7 +354,7 @@ fn enrich_row(row: &mut Row, entry: &Entry, snapshot: Option<&Snapshot>) {
     let ignored = code == Some(PorcelainCode::IGNORED);
     let missing = entry.kind == EntryKind::Symlink && target_is_missing(entry);
     if ignored || missing {
-        row.name = format::name::format_name(entry, ignored, missing);
+        row.name = format::name::format_name(palette, entry, ignored, missing);
     }
 }
 

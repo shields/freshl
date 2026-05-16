@@ -3,10 +3,12 @@ use std::io::Write;
 use anstyle::{Effects, Style};
 
 use crate::entry::{Entry, EntryKind};
+use crate::format::palette::Palette;
 use crate::owner::{OwnerCache, UserDirectory};
 
 pub mod git_col;
 pub mod name;
+pub mod palette;
 pub mod perms;
 pub mod size;
 pub mod time;
@@ -39,7 +41,11 @@ pub struct Row {
     pub name: Vec<u8>,
 }
 
-pub fn build_row<D: UserDirectory>(entry: &Entry, owners: &mut OwnerCache<D>) -> Row {
+pub fn build_row<D: UserDirectory>(
+    entry: &Entry,
+    owners: &mut OwnerCache<D>,
+    palette: &Palette,
+) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
     let (size, size_width) = match entry.kind {
         EntryKind::CharDevice | EntryKind::BlockDevice => size::format_rdev(entry.rdev),
@@ -55,7 +61,7 @@ pub fn build_row<D: UserDirectory>(entry: &Entry, owners: &mut OwnerCache<D>) ->
         size_width,
         mtime: time::format_time_styled(entry.mtime, dim),
         git: None,
-        name: name::format_name(entry, false, false),
+        name: name::format_name(palette, entry, false, false),
     }
 }
 
@@ -111,6 +117,7 @@ pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> 
 mod tests {
     use super::{ColumnWidths, Row, build_row, compute_widths, render_row};
     use crate::entry::{Entry, EntryKind};
+    use crate::format::palette::Palette;
     use crate::owner::{OwnerCache, UserDirectory};
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -145,6 +152,7 @@ mod tests {
     #[test]
     fn build_row_renders_device_rdev_in_size_column() {
         let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
         for (kind, rdev, expected, kind_char) in [
             (EntryKind::CharDevice, 0x0300_0002u64, "0x3000002", 'c'),
             (EntryKind::BlockDevice, 0x0100_0000u64, "0x1000000", 'b'),
@@ -153,7 +161,7 @@ mod tests {
             e.kind = kind;
             e.size = 0;
             e.rdev = rdev;
-            let row = build_row(&e, &mut owners);
+            let row = build_row(&e, &mut owners, &palette);
             assert_eq!(row.size, expected);
             assert_eq!(row.size_width, expected.len());
             assert_eq!(row.kind, kind_char);
@@ -163,7 +171,8 @@ mod tests {
     #[test]
     fn build_row_populates_basic_fields() {
         let mut owners = OwnerCache::new(Fixed);
-        let row = build_row(&entry("hi"), &mut owners);
+        let palette = Palette::empty();
+        let row = build_row(&entry("hi"), &mut owners, &palette);
         assert_eq!(row.kind, ' ');
         assert_eq!(row.mode, "644");
         assert_eq!(row.nlink, "1");

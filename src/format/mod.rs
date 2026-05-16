@@ -5,6 +5,7 @@ use anstyle::{Effects, Style};
 use crate::entry::Entry;
 use crate::owner::{OwnerCache, UserDirectory};
 
+pub mod git_col;
 pub mod name;
 pub mod perms;
 pub mod size;

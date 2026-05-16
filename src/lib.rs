@@ -13,6 +13,7 @@ pub mod collect;
 pub mod entry;
 pub mod error;
 pub mod format;
+pub mod git;
 pub mod owner;
 pub mod sort;
 
@@ -21,7 +22,24 @@ use case::{DetectorCache, ProbeDetector};
 use entry::{Entry, EntryKind};
 use error::Error;
 use format::{Row, build_row, compute_widths, render_row};
+use git::{Snapshot, SnapshotCache};
 use owner::{OwnerCache, SystemDirectory};
+
+struct Caches {
+    owners: OwnerCache<SystemDirectory>,
+    sensitivity: DetectorCache<ProbeDetector>,
+    snapshots: SnapshotCache,
+}
+
+impl Caches {
+    fn new() -> Self {
+        Self {
+            owners: OwnerCache::new(SystemDirectory),
+            sensitivity: DetectorCache::new(ProbeDetector),
+            snapshots: SnapshotCache::new(),
+        }
+    }
+}
 
 #[must_use]
 pub fn run<I>(raw: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode
@@ -71,8 +89,7 @@ fn list(
     let mut had_error = false;
     let mut have_output = false;
     let mut last_was_dir = false;
-    let mut owners = OwnerCache::new(SystemDirectory);
-    let mut sensitivity = DetectorCache::new(ProbeDetector);
+    let mut caches = Caches::new();
 
     for target in targets {
         let entry = match collect::entry_for_path(target) {
@@ -94,7 +111,7 @@ fn list(
         if have_output && (this_is_dir || last_was_dir) {
             writeln!(stdout).map_err(stdout_io)?;
         }
-        match list_target(stdout, stderr, target, multi, &entry, &mut owners, &mut sensitivity) {
+        match list_target(stdout, stderr, target, multi, &entry, &mut caches) {
             Ok(target_had_error) => {
                 had_error |= target_had_error;
                 have_output = true;
@@ -120,15 +137,15 @@ fn list_target(
     target: &Path,
     show_label: bool,
     entry: &Entry,
-    owners: &mut OwnerCache<SystemDirectory>,
-    sensitivity: &mut DetectorCache<ProbeDetector>,
+    caches: &mut Caches,
 ) -> Result<bool, Error> {
     if entry.kind != EntryKind::Directory {
         // Print the file's row using the user-supplied path as the name, so
         // `freshl /etc/passwd` renders `… /etc/passwd` (not just `passwd`).
         let mut for_display = entry.clone();
         for_display.name = target.as_os_str().to_os_string();
-        render_entries(stdout, &[for_display], owners)?;
+        let snapshot = caches.snapshots.for_target(target);
+        render_entries(stdout, &[for_display], &mut caches.owners, snapshot)?;
         return Ok(false);
     }
     let listing = collect::collect_directory(target).map_err(|source| Error::Io {
@@ -141,10 +158,11 @@ fn list_target(
     let mut entries = listing.entries;
     let sense = {
         let names: Vec<&std::ffi::OsStr> = entries.iter().map(|e| e.name.as_os_str()).collect();
-        sensitivity.sensitivity(target, &names)
+        caches.sensitivity.sensitivity(target, &names)
     };
     sort::sort(&mut entries, sense);
-    render_entries(stdout, &entries, owners)?;
+    let snapshot = caches.snapshots.for_target(target);
+    render_entries(stdout, &entries, &mut caches.owners, snapshot)?;
     for (path, source) in &listing.errors {
         let _ = writeln!(
             stderr,
@@ -162,16 +180,27 @@ fn render_entries(
     stdout: &mut dyn Write,
     entries: &[Entry],
     owners: &mut OwnerCache<SystemDirectory>,
+    snapshot: Option<&Snapshot>,
 ) -> Result<(), Error> {
     let mut rows: Vec<Row> = entries.iter().map(|e| build_row(e, owners)).collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
-        if entry.kind == EntryKind::Symlink && target_is_missing(entry) {
-            row.name = format::name::format_name(entry, false, true);
+        if let Some(snap) = snapshot {
+            row.git = Some(format::git_col::render(snap.lookup(&entry.path)));
+        }
+        let ignored = snapshot.is_some_and(|s| s.is_ignored(&entry.path));
+        let missing = entry.kind == EntryKind::Symlink && target_is_missing(entry);
+        if ignored || missing {
+            row.name = format::name::format_name(entry, ignored, missing);
         }
     }
     let widths = compute_widths(&rows);
+    let git_width = if snapshot.is_some() {
+        format::git_col::WIDTH
+    } else {
+        0
+    };
     for row in &rows {
-        let line = render_row(row, widths, 0);
+        let line = render_row(row, widths, git_width);
         stdout.write_all(&line).map_err(stdout_io)?;
         stdout.write_all(b"\n").map_err(stdout_io)?;
     }

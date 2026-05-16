@@ -335,6 +335,31 @@ fn git_repo_marks_unmerged_conflict() {
 }
 
 #[test]
+fn multiple_file_args_share_column_widths() {
+    let dir = tempdir().unwrap();
+    let small = dir.path().join("small");
+    let big = dir.path().join("big");
+    fs::write(&small, b"x").unwrap();
+    fs::write(&big, vec![b'x'; 1234]).unwrap();
+
+    let (code, out, _err) = run_paths(&[&small, &big]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    let small_line = out
+        .lines()
+        .find(|l| l.ends_with("small"))
+        .expect("row for small");
+    let big_line = out.lines().find(|l| l.ends_with("big")).expect("row for big");
+    // Shared widths put the path column at the same offset; without sharing,
+    // the smaller size column would shift the path left in the small row.
+    let small_idx = small_line.find(small.to_str().unwrap()).unwrap();
+    let big_idx = big_line.find(big.to_str().unwrap()).unwrap();
+    assert_eq!(
+        small_idx, big_idx,
+        "columns not aligned across files:\n{small_line}\n{big_line}"
+    );
+}
+
+#[test]
 fn nonexistent_path_emits_error_and_exits_one() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("nope");

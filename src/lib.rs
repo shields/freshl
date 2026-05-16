@@ -22,7 +22,7 @@ use case::{DetectorCache, ProbeDetector};
 use entry::{Entry, EntryKind};
 use error::Error;
 use format::{Row, build_row, compute_widths, render_row};
-use git::{Snapshot, SnapshotCache};
+use git::{PorcelainCode, Snapshot, SnapshotCache};
 use owner::{OwnerCache, SystemDirectory};
 
 struct Caches {
@@ -87,13 +87,27 @@ fn list(
     let targets: &[PathBuf] = if paths.is_empty() { &fallback } else { paths };
     let multi = targets.len() > 1;
     let mut had_error = false;
-    let mut have_output = false;
-    let mut last_was_dir = false;
     let mut caches = Caches::new();
 
+    // Split into a batch of files and a list of directories. Files render
+    // together so column widths span all file arguments (matching `ls -l
+    // file1 file2 …`); each directory then renders as its own block with
+    // its own widths.
+    let mut files: Vec<Entry> = Vec::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
     for target in targets {
-        let entry = match collect::entry_for_path(target) {
-            Ok(e) => e,
+        match collect::entry_for_path(target) {
+            Ok(entry) => {
+                if entry.kind == EntryKind::Directory {
+                    dirs.push(target.clone());
+                } else {
+                    // Display the user-supplied path so a `freshl /etc/passwd`
+                    // row reads `… /etc/passwd`, not just `passwd`.
+                    let mut e = entry;
+                    e.name = target.as_os_str().to_os_string();
+                    files.push(e);
+                }
+            }
             Err(source) => {
                 let _ = writeln!(
                     stderr,
@@ -104,18 +118,22 @@ fn list(
                     }
                 );
                 had_error = true;
-                continue;
             }
-        };
-        let this_is_dir = entry.kind == EntryKind::Directory;
-        if have_output && (this_is_dir || last_was_dir) {
+        }
+    }
+
+    let mut have_output = !files.is_empty();
+    if have_output {
+        render_files(stdout, &files, &mut caches)?;
+    }
+    for target in &dirs {
+        if have_output {
             writeln!(stdout).map_err(stdout_io)?;
         }
-        match list_target(stdout, stderr, target, multi, &entry, &mut caches) {
+        match list_directory(stdout, stderr, target, multi, &mut caches) {
             Ok(target_had_error) => {
                 had_error |= target_had_error;
                 have_output = true;
-                last_was_dir = this_is_dir;
             }
             Err(e @ Error::StdoutIo(_)) => return Err(e),
             Err(e) => {
@@ -131,23 +149,13 @@ fn list(
     })
 }
 
-fn list_target(
+fn list_directory(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     target: &Path,
     show_label: bool,
-    entry: &Entry,
     caches: &mut Caches,
 ) -> Result<bool, Error> {
-    if entry.kind != EntryKind::Directory {
-        // Print the file's row using the user-supplied path as the name, so
-        // `freshl /etc/passwd` renders `… /etc/passwd` (not just `passwd`).
-        let mut for_display = entry.clone();
-        for_display.name = target.as_os_str().to_os_string();
-        let snapshot = caches.snapshots.for_target(target);
-        render_entries(stdout, &[for_display], &mut caches.owners, snapshot)?;
-        return Ok(false);
-    }
     let listing = collect::collect_directory(target).map_err(|source| Error::Io {
         path: target.to_path_buf(),
         source,
@@ -184,22 +192,56 @@ fn render_entries(
 ) -> Result<(), Error> {
     let mut rows: Vec<Row> = entries.iter().map(|e| build_row(e, owners)).collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
-        if let Some(snap) = snapshot {
-            row.git = Some(format::git_col::render(snap.lookup(&entry.path)));
-        }
-        let ignored = snapshot.is_some_and(|s| s.is_ignored(&entry.path));
-        let missing = entry.kind == EntryKind::Symlink && target_is_missing(entry);
-        if ignored || missing {
-            row.name = format::name::format_name(entry, ignored, missing);
-        }
+        enrich_row(row, entry, snapshot);
     }
-    let widths = compute_widths(&rows);
     let git_width = if snapshot.is_some() {
         format::git_col::WIDTH
     } else {
         0
     };
-    for row in &rows {
+    write_rows(stdout, &rows, git_width)
+}
+
+fn render_files(
+    stdout: &mut dyn Write,
+    entries: &[Entry],
+    caches: &mut Caches,
+) -> Result<(), Error> {
+    // Each file argument may live in a different repository (or none); look
+    // up its snapshot one entry at a time so we don't hold multiple cache
+    // borrows at once, then render everything with shared widths.
+    let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
+    let mut any_git = false;
+    for entry in entries {
+        let mut row = build_row(entry, &mut caches.owners);
+        let snap = caches.snapshots.for_target(&entry.path);
+        if snap.is_some() {
+            any_git = true;
+        }
+        enrich_row(&mut row, entry, snap);
+        rows.push(row);
+    }
+    let git_width = if any_git { format::git_col::WIDTH } else { 0 };
+    write_rows(stdout, &rows, git_width)
+}
+
+fn enrich_row(row: &mut Row, entry: &Entry, snapshot: Option<&Snapshot>) {
+    // `Snapshot::lookup` can canonicalize the path; do it once and derive
+    // both the git column and the ignored flag from the same result.
+    let code = snapshot.map(|s| s.lookup(&entry.path));
+    if let Some(c) = code {
+        row.git = Some(format::git_col::render(c));
+    }
+    let ignored = code == Some(PorcelainCode::IGNORED);
+    let missing = entry.kind == EntryKind::Symlink && target_is_missing(entry);
+    if ignored || missing {
+        row.name = format::name::format_name(entry, ignored, missing);
+    }
+}
+
+fn write_rows(stdout: &mut dyn Write, rows: &[Row], git_width: usize) -> Result<(), Error> {
+    let widths = compute_widths(rows);
+    for row in rows {
         let line = render_row(row, widths, git_width);
         stdout.write_all(&line).map_err(stdout_io)?;
         stdout.write_all(b"\n").map_err(stdout_io)?;

@@ -74,6 +74,10 @@ pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
     } else {
         None
     };
+    // `fs::metadata` is `stat(2)`; symlink cycles surface as ELOOP and fall
+    // through to `false`, so the kernel's MAXSYMLINKS bounds the work.
+    let symlink_target_is_dir =
+        kind == EntryKind::Symlink && fs::metadata(path).is_ok_and(|m| m.is_dir());
     let name = path.file_name().map_or_else(
         || path.as_os_str().to_os_string(),
         std::ffi::OsStr::to_os_string,
@@ -90,6 +94,7 @@ pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
         rdev: meta.rdev(),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         symlink_target,
+        symlink_target_is_dir,
     })
 }
 
@@ -190,6 +195,20 @@ mod tests {
         let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
         assert_eq!(entry.symlink_target.as_deref(), Some(target.as_path()));
+        assert!(!entry.symlink_target_is_dir);
+    }
+
+    #[test]
+    fn entry_for_path_symlink_to_directory_sets_target_is_dir() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target_dir");
+        fs::create_dir(&target).unwrap();
+        let link = dir.path().join("link_to_dir");
+        symlink(&target, &link).unwrap();
+
+        let entry = entry_for_path(&link).unwrap();
+        assert_eq!(entry.kind, EntryKind::Symlink);
+        assert!(entry.symlink_target_is_dir);
     }
 
     #[test]
@@ -200,6 +219,21 @@ mod tests {
         let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
         assert!(entry.symlink_target.is_some());
+        assert!(!entry.symlink_target_is_dir);
+    }
+
+    #[test]
+    fn entry_for_path_symlink_cycle_does_not_loop_and_is_not_dir() {
+        // Pins the loop-safety contract: ELOOP from stat(2) maps to false,
+        // so a hand-rolled symlink walk could not silently replace it.
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("loop_a");
+        let b = dir.path().join("loop_b");
+        symlink(&b, &a).unwrap();
+        symlink(&a, &b).unwrap();
+        let entry = entry_for_path(&a).unwrap();
+        assert_eq!(entry.kind, EntryKind::Symlink);
+        assert!(!entry.symlink_target_is_dir);
     }
 
     #[test]

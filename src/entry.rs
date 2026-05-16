@@ -43,6 +43,9 @@ pub struct Entry {
     pub rdev: u64,
     pub mtime: SystemTime,
     pub symlink_target: Option<PathBuf>,
+    // True only when `kind == Symlink` and the target stats as a directory.
+    // Read by the sort comparator so symlinks-to-dirs group with real dirs.
+    pub symlink_target_is_dir: bool,
 }
 
 #[cfg(test)]

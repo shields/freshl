@@ -687,6 +687,7 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: Some(PathBuf::from("/definitely/does/not/exist/anywhere")),
+            symlink_target_is_dir: false,
         };
         assert!(target_is_missing(&e));
     }
@@ -710,6 +711,7 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
+            symlink_target_is_dir: false,
         };
         assert!(!target_is_missing(&e));
     }
@@ -735,6 +737,7 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: Some(PathBuf::from("does-not-exist-anywhere")),
+            symlink_target_is_dir: false,
         };
         assert!(target_is_missing(&e));
     }

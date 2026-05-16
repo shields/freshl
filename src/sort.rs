@@ -105,6 +105,7 @@ mod tests {
             uid: 0,
             gid: 0,
             size: 0,
+            rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
         }

@@ -40,6 +40,7 @@ pub struct Entry {
     pub uid: u32,
     pub gid: u32,
     pub size: u64,
+    pub rdev: u64,
     pub mtime: SystemTime,
     pub symlink_target: Option<PathBuf>,
 }

@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anstyle::{Effects, Style};
 
-use crate::entry::Entry;
+use crate::entry::{Entry, EntryKind};
 use crate::owner::{OwnerCache, UserDirectory};
 
 pub mod git_col;
@@ -41,7 +41,10 @@ pub struct Row {
 
 pub fn build_row<D: UserDirectory>(entry: &Entry, owners: &mut OwnerCache<D>) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
-    let (size, size_width) = size::format_size(entry.size, dim);
+    let (size, size_width) = match entry.kind {
+        EntryKind::CharDevice | EntryKind::BlockDevice => size::format_rdev(entry.rdev),
+        _ => size::format_size(entry.size, dim),
+    };
     Row {
         kind: entry.kind.type_char(),
         mode: perms::format_perms(entry.mode),
@@ -130,8 +133,27 @@ mod tests {
             uid: 501,
             gid: 20,
             size: 1234,
+            rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
+        }
+    }
+
+    #[test]
+    fn build_row_renders_device_rdev_in_size_column() {
+        let mut owners = OwnerCache::new(Fixed);
+        for (kind, rdev, expected, kind_char) in [
+            (EntryKind::CharDevice, 0x0300_0002u64, "0x3000002", 'c'),
+            (EntryKind::BlockDevice, 0x0100_0000u64, "0x1000000", 'b'),
+        ] {
+            let mut e = entry("dev");
+            e.kind = kind;
+            e.size = 0;
+            e.rdev = rdev;
+            let row = build_row(&e, &mut owners);
+            assert_eq!(row.size, expected);
+            assert_eq!(row.size_width, expected.len());
+            assert_eq!(row.kind, kind_char);
         }
     }
 

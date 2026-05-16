@@ -56,6 +56,21 @@ fn run_git(dir: &Path, args: &[&str]) {
 }
 
 #[test]
+fn device_files_show_rdev_as_hex_in_size_column() {
+    let null = Path::new("/dev/null");
+    let (code, out, _err) = run_paths(&[null]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    let line = out
+        .lines()
+        .find(|l| l.contains("/dev/null"))
+        .expect("expected a row for /dev/null");
+    let has_hex_token = line.split_whitespace().any(|t| {
+        t.starts_with("0x") && t.len() > 2 && t[2..].chars().all(|c| c.is_ascii_hexdigit())
+    });
+    assert!(has_hex_token, "expected a 0x<hex> token in row: {line}");
+}
+
+#[test]
 fn basic_listing_columns() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("hello"), b"world").unwrap();

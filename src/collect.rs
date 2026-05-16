@@ -89,6 +89,7 @@ pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
         uid: meta.uid(),
         gid: meta.gid(),
         size: meta.size(),
+        rdev: meta.rdev(),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         symlink_target,
     })

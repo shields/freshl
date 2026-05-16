@@ -25,9 +25,19 @@ pub fn format_size(size: u64, dim: Style) -> (String, usize) {
     (out, width)
 }
 
+// Device entries reuse the size column: instead of a byte count (always 0 for
+// devices), we print the `rdev` value as `0x` + lowercase hex with no leading
+// zeros, matching macOS `ls -l` output (e.g. `0x3000002` for `/dev/null`).
+#[must_use]
+pub fn format_rdev(rdev: u64) -> (String, usize) {
+    let s = format!("{rdev:#x}");
+    let w = s.len();
+    (s, w)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_size;
+    use super::{format_rdev, format_size};
     use anstyle::{Effects, Style};
 
     fn dim() -> Style {
@@ -94,5 +104,28 @@ mod tests {
         let d = dim();
         let expected = format!("1{d}234567890123{}", d.render_reset());
         assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn format_rdev_emits_lowercase_hex_with_0x_prefix() {
+        let (s, w) = format_rdev(0x0300_0002);
+        assert_eq!(s, "0x3000002");
+        assert_eq!(w, 9);
+    }
+
+    #[test]
+    fn format_rdev_zero_renders_as_0x0() {
+        let (s, w) = format_rdev(0);
+        assert_eq!(s, "0x0");
+        assert_eq!(w, 3);
+    }
+
+    #[test]
+    fn format_rdev_width_matches_string_length() {
+        for v in [0u64, 1, 0xff, 0x0100_0000, u64::MAX] {
+            let (s, w) = format_rdev(v);
+            assert_eq!(w, s.len());
+            assert!(s.starts_with("0x"));
+        }
     }
 }

@@ -502,6 +502,7 @@ mod tests {
             uid: 0,
             gid: 0,
             size: 0,
+            rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: Some(PathBuf::from("/definitely/does/not/exist/anywhere")),
         };
@@ -524,6 +525,7 @@ mod tests {
             uid: 0,
             gid: 0,
             size: 0,
+            rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
         };
@@ -548,6 +550,7 @@ mod tests {
             uid: 0,
             gid: 0,
             size: 0,
+            rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: Some(PathBuf::from("does-not-exist-anywhere")),
         };

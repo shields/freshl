@@ -134,10 +134,7 @@ mod tests {
     #[test]
     fn probe_detector_treats_dir_with_both_cased_names_as_sensitive() {
         let dir = tempdir().unwrap();
-        let s = ProbeDetector.detect(
-            dir.path(),
-            &[OsStr::new("readme"), OsStr::new("Readme")],
-        );
+        let s = ProbeDetector.detect(dir.path(), &[OsStr::new("readme"), OsStr::new("Readme")]);
         assert_eq!(s, Sensitivity::Sensitive);
     }
 

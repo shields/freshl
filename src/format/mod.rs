@@ -75,7 +75,10 @@ pub fn compute_widths(rows: &[Row]) -> ColumnWidths {
 }
 
 fn max_width(rows: &[Row], field: impl Fn(&Row) -> &str) -> usize {
-    rows.iter().map(|r| field(r).chars().count()).max().unwrap_or(0)
+    rows.iter()
+        .map(|r| field(r).chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 #[must_use]

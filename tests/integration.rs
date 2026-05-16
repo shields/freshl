@@ -348,7 +348,10 @@ fn multiple_file_args_share_column_widths() {
         .lines()
         .find(|l| l.ends_with("small"))
         .expect("row for small");
-    let big_line = out.lines().find(|l| l.ends_with("big")).expect("row for big");
+    let big_line = out
+        .lines()
+        .find(|l| l.ends_with("big"))
+        .expect("row for big");
     // Shared widths put the path column at the same offset; without sharing,
     // the smaller size column would shift the path left in the small row.
     let small_idx = small_line.find(small.to_str().unwrap()).unwrap();
@@ -366,4 +369,206 @@ fn nonexistent_path_emits_error_and_exits_one() {
     let (code, _out, err) = run_paths(&[&missing]);
     assert_eq!(code_repr(code), code_repr(ExitCode::from(1)));
     assert!(!err.is_empty());
+}
+
+fn run_args(items: &[&str]) -> (ExitCode, String, String) {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let code = freshl::run(os(items), &mut out, &mut err);
+    (
+        code,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+#[test]
+fn sort_by_size_orders_largest_first_end_to_end() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("small"), b"x").unwrap();
+    fs::write(dir.path().join("big"), vec![b'x'; 9_000]).unwrap();
+    fs::write(dir.path().join("mid"), vec![b'x'; 900]).unwrap();
+    let (code, out, _err) = run_args(&["-S", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    let big_at = out.find("big").unwrap();
+    let mid_at = out.find("mid").unwrap();
+    let small_at = out.find("small").unwrap();
+    assert!(
+        big_at < mid_at && mid_at < small_at,
+        "ordering wrong:\n{out}"
+    );
+}
+
+#[test]
+fn sort_by_time_orders_newest_first_end_to_end() {
+    use std::fs::File;
+    use std::time::{Duration, SystemTime};
+    let dir = tempdir().unwrap();
+    let oldest = dir.path().join("oldest");
+    let middle = dir.path().join("middle");
+    let newest = dir.path().join("newest");
+    fs::write(&oldest, b"x").unwrap();
+    fs::write(&middle, b"y").unwrap();
+    fs::write(&newest, b"z").unwrap();
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    File::options()
+        .write(true)
+        .open(&oldest)
+        .unwrap()
+        .set_modified(base)
+        .unwrap();
+    File::options()
+        .write(true)
+        .open(&middle)
+        .unwrap()
+        .set_modified(base + Duration::from_secs(100))
+        .unwrap();
+    File::options()
+        .write(true)
+        .open(&newest)
+        .unwrap()
+        .set_modified(base + Duration::from_secs(200))
+        .unwrap();
+
+    let (code, out, _err) = run_args(&["-t", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    let newest_at = out.find("newest").unwrap();
+    let middle_at = out.find("middle").unwrap();
+    let oldest_at = out.find("oldest").unwrap();
+    assert!(
+        newest_at < middle_at && middle_at < oldest_at,
+        "ordering wrong:\n{out}"
+    );
+}
+
+#[test]
+fn reverse_keeps_directories_grouped_first_end_to_end() {
+    let dir = tempdir().unwrap();
+    fs::create_dir(dir.path().join("dir_a")).unwrap();
+    fs::create_dir(dir.path().join("dir_b")).unwrap();
+    fs::write(dir.path().join("file_a"), b"x").unwrap();
+    fs::write(dir.path().join("file_b"), b"y").unwrap();
+    let (code, out, _err) = run_args(&["-r", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    let dir_b = out.find("dir_b").unwrap();
+    let dir_a = out.find("dir_a").unwrap();
+    let file_b = out.find("file_b").unwrap();
+    let file_a = out.find("file_a").unwrap();
+    // Directories first (reversed within), then files (reversed within).
+    assert!(dir_b < dir_a, "dir_b before dir_a:\n{out}");
+    assert!(dir_a < file_b, "all dirs before any files:\n{out}");
+    assert!(file_b < file_a, "file_b before file_a:\n{out}");
+}
+
+#[test]
+fn recursive_lists_nested_blocks_with_labels() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("a");
+    let b = a.join("b");
+    fs::create_dir(&a).unwrap();
+    fs::create_dir(&b).unwrap();
+    fs::write(a.join("leaf"), b"x").unwrap();
+    fs::write(b.join("deep"), b"y").unwrap();
+    let (code, out, _err) = run_args(&["-R", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(out.contains("leaf"));
+    assert!(out.contains("deep"));
+    let labels = out.lines().filter(|l| l.ends_with(':')).count();
+    assert_eq!(labels, 3, "expected three labeled blocks:\n{out}");
+}
+
+#[test]
+fn recursive_with_time_sort_still_recurses() {
+    let dir = tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::write(sub.join("inside"), b"y").unwrap();
+    fs::write(dir.path().join("top"), b"x").unwrap();
+    let (code, out, _err) = run_args(&["-Rt", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(out.contains("inside"));
+    assert!(out.contains("top"));
+}
+
+#[test]
+fn unknown_letter_in_cluster_exits_two() {
+    let (code, _out, err) = run_args(&["-RX"]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::from(2)));
+    assert!(err.contains("-RX"), "got: {err}");
+}
+
+#[test]
+fn size_sort_applies_to_top_level_file_args() {
+    let dir = tempdir().unwrap();
+    let small = dir.path().join("aaa_small");
+    let big = dir.path().join("zzz_big");
+    fs::write(&small, b"x").unwrap();
+    fs::write(&big, vec![b'x'; 9_000]).unwrap();
+    let (code, out, _err) = run_args(&["-S", small.to_str().unwrap(), big.to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    // Without -S the alphabetical default would put aaa_small first; -S
+    // must reorder so the larger file appears first.
+    let big_at = out.find("zzz_big").unwrap();
+    let small_at = out.find("aaa_small").unwrap();
+    assert!(big_at < small_at, "top-level -S did not sort:\n{out}");
+}
+
+#[test]
+fn recursive_failed_root_does_not_emit_orphan_blank_for_next_arg() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let locked = dir.path().join("locked_root");
+    let good = dir.path().join("good_root");
+    fs::create_dir(&locked).unwrap();
+    fs::create_dir(&good).unwrap();
+    fs::write(good.join("kid"), b"x").unwrap();
+    let mut p = fs::metadata(&locked).unwrap().permissions();
+    p.set_mode(0o000);
+    fs::set_permissions(&locked, p).unwrap();
+
+    let (code, out, _err) = run_args(&["-R", locked.to_str().unwrap(), good.to_str().unwrap()]);
+
+    let mut p = fs::metadata(&locked).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&locked, p).unwrap();
+
+    assert_eq!(code_repr(code), code_repr(ExitCode::from(1)));
+    // The failed first root must not have left a blank-line separator that
+    // would now sit at the top of the good root's output.
+    assert!(!out.starts_with('\n'), "leading orphan blank line:\n{out}");
+}
+
+#[test]
+fn recursive_failed_first_subdir_does_not_emit_orphan_blank() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    // Names chosen so the locked directory sorts first alphabetically and
+    // is therefore the first popped from the DFS stack.
+    let locked = dir.path().join("aaa_locked");
+    let good = dir.path().join("zzz_good");
+    fs::create_dir(&locked).unwrap();
+    fs::create_dir(&good).unwrap();
+    fs::write(good.join("kid"), b"x").unwrap();
+    let mut p = fs::metadata(&locked).unwrap().permissions();
+    p.set_mode(0o000);
+    fs::set_permissions(&locked, p).unwrap();
+
+    let (code, out, _err) = run_args(&["-R", dir.path().to_str().unwrap()]);
+
+    let mut p = fs::metadata(&locked).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&locked, p).unwrap();
+
+    assert_eq!(code_repr(code), code_repr(ExitCode::from(1)));
+    // Two consecutive blank lines would mean an orphan separator was emitted
+    // for the failed subdir block.
+    assert!(!out.contains("\n\n\n"), "double blank in output:\n{out}");
+}
+
+#[test]
+fn bundled_short_flag_cluster_parses_and_lists() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("one"), b"x").unwrap();
+    let (code, _out, _err) = run_args(&["-rSt", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
 }

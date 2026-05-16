@@ -42,10 +42,7 @@ pub fn collect_directory(path: &Path) -> io::Result<DirListing> {
 // dead in each instantiation, which trips per-instantiation line coverage even
 // when both arms are exercised across tests. A trait-object reference avoids
 // the heap allocation a `Box<dyn …>` would impose on every directory read.
-fn process_paths(
-    iter: &mut dyn Iterator<Item = io::Result<PathBuf>>,
-    parent: &Path,
-) -> DirListing {
+fn process_paths(iter: &mut dyn Iterator<Item = io::Result<PathBuf>>, parent: &Path) -> DirListing {
     let mut listing = DirListing::default();
     for r in iter {
         match r {
@@ -77,9 +74,10 @@ pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
     } else {
         None
     };
-    let name = path
-        .file_name()
-        .map_or_else(|| path.as_os_str().to_os_string(), std::ffi::OsStr::to_os_string);
+    let name = path.file_name().map_or_else(
+        || path.as_os_str().to_os_string(),
+        std::ffi::OsStr::to_os_string,
+    );
     Ok(Entry {
         name,
         path: path.to_path_buf(),

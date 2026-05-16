@@ -214,6 +214,27 @@ gets refactored, not exempted.
   publishes. If not, switch to a tiny hand-rolled `getpwuid` / `getgrgid`
   wrapper via `rustix` (still no `unsafe`).
 
+## 5a. Sort and recursion flags
+
+After the core listing path is stable, the next layer adds the four most-used
+GNU ls sort and recursion flags plus a ripgrep-style escalation modifier:
+
+- `-S` (size, largest first) and `-t` (mtime, newest first) extend `sort.rs`
+  with a `SortKey` enum and a keyed comparator. Both keep directories grouped
+  first; the key only controls within-group order.
+- `-r` reverses the within-group order via `Ordering::reverse` (preserving
+  sort stability), still without disturbing the dirs/files split.
+- `-R` introduces depth-first recursion driven from `lib.rs`. Each visited
+  directory is rendered as its own labeled block. Symlinks to directories are
+  never followed.
+- `-u` / `-uu` gate the descent: by default `-R` skips hidden (dot-prefix)
+  and gitignored directories; `-u` enables gitignored descent; `-uu` enables
+  hidden descent as well. The rows are still listed in every case — only the
+  descent is gated.
+
+Short flags may be bundled (`-Rt`, `-Sr`, `-Ruu`, …). Coverage for every new
+branch lands with the implementation.
+
 ## 6. First commit after approval
 
 Scaffold only (step 0 from § 3): `cargo init`, lint table, Makefile, CI

@@ -224,12 +224,24 @@ Drawing from the above, the design `freshl` commits to:
     group, natural sort (`f2` before `f10`). Case sensitivity follows
     the filesystem — macOS via `pathconf(_PC_CASE_SENSITIVE)`, Linux
     defaults to case-sensitive (with `statx` casefold detection where
-    the kernel supports it).
+    the kernel supports it). `-S` (size, largest first) and `-t`
+    (mtime, newest first) change the within-group key but keep
+    directories grouped first; `-r` reverses the within-group order
+    while leaving the dirs/files split intact. Top-level CLI
+    arguments are sorted by the same rules within their file batch
+    and their directory list.
 12. **Multiple path arguments** emit each as a separate labeled
     section, like `ls foo/ bar/`.
 13. **A file argument** prints a single row for that file. No
     directory traversal.
-14. **Targets**: Linux and macOS only. No Windows, no BSDs (initially).
+14. **`-R`** walks directories depth-first, one labeled block per
+    directory visited. Symlinks to directories are never followed
+    (cycles impossible, behaviour stable). By default, recursion
+    skips hidden directories (dot-prefixed names) and gitignored
+    directories — the rows are still listed, only the descent is
+    gated. The gate is opened ripgrep-style: `-u` also recurses into
+    gitignored directories; `-uu` also recurses into hidden ones.
+15. **Targets**: Linux and macOS only. No Windows, no BSDs (initially).
 
 ### Git integration
 
@@ -257,8 +269,9 @@ Drawing from the above, the design `freshl` commits to:
 19. **Zero config files.** Environment-respect (`NO_COLOR`, terminal
     width) yes; user config no. No themes, no YAML, no env-var color
     DSLs.
-20. **No tree mode** (for now). `tree` exists; `broot` exists. If we
-    add it later it'll be a subcommand, not a flag.
+20. **No tree-drawing recursion** (for now). `-R` lists nested
+    directories as labeled blocks; ASCII tree art with branch glyphs
+    is `tree`/`broot` territory and would be a subcommand if added.
 21. **No OSC 8 hyperlinks.** Don't decorate filenames with terminal
     escape sequences that some clients render and others leak as
     visual noise.

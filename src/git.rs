@@ -118,9 +118,7 @@ impl Snapshot {
             // `std::path::absolute` strips all `.` components (both leading
             // and interior) on POSIX, so we only have to watch for `..`,
             // which it preserves and which would mis-key the status lookup.
-            let has_dotdot = rel
-                .components()
-                .any(|c| matches!(c, Component::ParentDir));
+            let has_dotdot = rel.components().any(|c| matches!(c, Component::ParentDir));
             if !has_dotdot {
                 return Some(rel.to_path_buf());
             }
@@ -368,7 +366,10 @@ mod tests {
         let guard = GIT_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         run_git(dir.path(), &["init", "-q", "-b", "main"]);
-        run_git(dir.path(), &["config", "user.email", "test@example.invalid"]);
+        run_git(
+            dir.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
         run_git(dir.path(), &["config", "user.name", "Test"]);
         (guard, dir)
     }
@@ -654,10 +655,7 @@ mod tests {
             PorcelainCode::UNTRACKED,
         );
         // A sibling outside the collapsed directory stays clean.
-        assert_eq!(
-            snap.lookup(Path::new("/repo/other")),
-            PorcelainCode::CLEAN,
-        );
+        assert_eq!(snap.lookup(Path::new("/repo/other")), PorcelainCode::CLEAN,);
     }
 
     #[test]
@@ -726,10 +724,7 @@ mod tests {
         };
         // canonicalize succeeds but lands outside `root`, so the second
         // strip_prefix returns Err and `relativize` yields None.
-        assert_eq!(
-            snap.lookup(&canonical.join("file")),
-            PorcelainCode::CLEAN,
-        );
+        assert_eq!(snap.lookup(&canonical.join("file")), PorcelainCode::CLEAN,);
     }
 
     #[test]
@@ -802,10 +797,7 @@ mod tests {
         };
         // A bare `..` has no file_name; lookup must not panic and must
         // return CLEAN (the parent dir of the tempdir is outside the root).
-        assert_eq!(
-            snap.lookup(Path::new("..")),
-            PorcelainCode::CLEAN,
-        );
+        assert_eq!(snap.lookup(Path::new("..")), PorcelainCode::CLEAN,);
     }
 
     #[test]
@@ -907,7 +899,10 @@ mod tests {
         // canonicalize fails because the path doesn't exist, but
         // `std::path::absolute` succeeds lexically.
         let result = normalize_existing(Path::new("/tmp/freshl-definitely-missing-12345"));
-        assert_eq!(result, Some(PathBuf::from("/tmp/freshl-definitely-missing-12345")));
+        assert_eq!(
+            result,
+            Some(PathBuf::from("/tmp/freshl-definitely-missing-12345"))
+        );
     }
 
     #[test]

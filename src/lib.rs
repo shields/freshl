@@ -1,6 +1,7 @@
 #[cfg(not(unix))]
 compile_error!("freshl targets POSIX file metadata and only builds on Unix.");
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -17,7 +18,7 @@ pub mod git;
 pub mod owner;
 pub mod sort;
 
-use args::{Action, parse};
+use args::{Action, ListOptions, parse};
 use case::{DetectorCache, ProbeDetector};
 use entry::{Entry, EntryKind};
 use error::Error;
@@ -55,22 +56,16 @@ where
     }
 }
 
-fn dispatch<I>(
-    raw: I,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
-) -> Result<ExitCode, Error>
+fn dispatch<I>(raw: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> Result<ExitCode, Error>
 where
     I: IntoIterator<Item = OsString>,
 {
     let action = parse(raw).map_err(|e| Error::Usage(e.message))?;
     match action {
         Action::Help => write_stdout(stdout, args::HELP.as_bytes()).map(|()| ExitCode::SUCCESS),
-        Action::Version => {
-            write_stdout(stdout, format!("{}\n", args::version_line()).as_bytes())
-                .map(|()| ExitCode::SUCCESS)
-        }
-        Action::List(paths) => list(stdout, stderr, &paths),
+        Action::Version => write_stdout(stdout, format!("{}\n", args::version_line()).as_bytes())
+            .map(|()| ExitCode::SUCCESS),
+        Action::List { paths, options } => list(stdout, stderr, &paths, options),
     }
 }
 
@@ -82,10 +77,13 @@ fn list(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     paths: &[PathBuf],
+    options: ListOptions,
 ) -> Result<ExitCode, Error> {
     let fallback = [PathBuf::from(".")];
     let targets: &[PathBuf] = if paths.is_empty() { &fallback } else { paths };
-    let multi = targets.len() > 1;
+    // Under -R every directory gets a label so each block is identifiable in
+    // the depth-first stream; otherwise only multi-target listings label.
+    let label_dirs = options.recursive || targets.len() > 1;
     let mut had_error = false;
     let mut caches = Caches::new();
 
@@ -94,18 +92,18 @@ fn list(
     // file1 file2 …`); each directory then renders as its own block with
     // its own widths.
     let mut files: Vec<Entry> = Vec::new();
-    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut dirs: Vec<Entry> = Vec::new();
     for target in targets {
         match collect::entry_for_path(target) {
-            Ok(entry) => {
+            Ok(mut entry) => {
+                // Display the user-supplied path so a `freshl /etc/passwd`
+                // row reads `… /etc/passwd`, not just `passwd`, and so the
+                // dir labels under -R / multi-target match what was typed.
+                entry.name = target.as_os_str().to_os_string();
                 if entry.kind == EntryKind::Directory {
-                    dirs.push(target.clone());
+                    dirs.push(entry);
                 } else {
-                    // Display the user-supplied path so a `freshl /etc/passwd`
-                    // row reads `… /etc/passwd`, not just `passwd`.
-                    let mut e = entry;
-                    e.name = target.as_os_str().to_os_string();
-                    files.push(e);
+                    files.push(entry);
                 }
             }
             Err(source) => {
@@ -121,16 +119,38 @@ fn list(
             }
         }
     }
+    // Apply the requested sort key to top-level CLI args within each split.
+    // No filesystem to probe for top-level args (they can span filesystems);
+    // Sensitive is the natural default and only matters for the natural-name
+    // tie-breaker.
+    sort::sort_with(
+        &mut files,
+        case::Sensitivity::Sensitive,
+        options.sort_key,
+        options.reverse,
+    );
+    sort::sort_with(
+        &mut dirs,
+        case::Sensitivity::Sensitive,
+        options.sort_key,
+        options.reverse,
+    );
 
     let mut have_output = !files.is_empty();
     if have_output {
         render_files(stdout, &files, &mut caches)?;
     }
-    for target in &dirs {
+    for dir_entry in &dirs {
         if have_output {
             writeln!(stdout).map_err(stdout_io)?;
         }
-        match list_directory(stdout, stderr, target, multi, &mut caches) {
+        let target = &dir_entry.path;
+        let result = if options.recursive {
+            list_recursive(stdout, stderr, target, options, &mut caches)
+        } else {
+            list_directory(stdout, stderr, target, label_dirs, options, &mut caches)
+        };
+        match result {
             Ok(target_had_error) => {
                 had_error |= target_had_error;
                 have_output = true;
@@ -154,6 +174,7 @@ fn list_directory(
     stderr: &mut dyn Write,
     target: &Path,
     show_label: bool,
+    options: ListOptions,
     caches: &mut Caches,
 ) -> Result<bool, Error> {
     let listing = collect::collect_directory(target).map_err(|source| Error::Io {
@@ -168,10 +189,14 @@ fn list_directory(
         let names: Vec<&std::ffi::OsStr> = entries.iter().map(|e| e.name.as_os_str()).collect();
         caches.sensitivity.sensitivity(target, &names)
     };
-    sort::sort(&mut entries, sense);
+    sort::sort_with(&mut entries, sense, options.sort_key, options.reverse);
     let snapshot = caches.snapshots.for_target(target);
     render_entries(stdout, &entries, &mut caches.owners, snapshot)?;
-    for (path, source) in &listing.errors {
+    Ok(report_listing_errors(stderr, &listing.errors))
+}
+
+fn report_listing_errors(stderr: &mut dyn Write, errors: &[(PathBuf, io::Error)]) -> bool {
+    for (path, source) in errors {
         let _ = writeln!(
             stderr,
             "{}",
@@ -181,7 +206,94 @@ fn list_directory(
             }
         );
     }
-    Ok(!listing.errors.is_empty())
+    !errors.is_empty()
+}
+
+/// Walk `root` depth-first, rendering each directory as its own labeled
+/// block. Subdirectory descent is gated on the unrestricted level: hidden
+/// (dot-prefix) and gitignored directories are skipped by default and
+/// progressively un-skipped at `-u` (gitignored) and `-uu` (hidden too).
+fn list_recursive(
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    root: &Path,
+    options: ListOptions,
+    caches: &mut Caches,
+) -> Result<bool, Error> {
+    let mut stack: VecDeque<PathBuf> = VecDeque::new();
+    stack.push_back(root.to_path_buf());
+    let mut had_error = false;
+    let mut first = true;
+    while let Some(target) = stack.pop_front() {
+        let listing = match collect::collect_directory(&target) {
+            Ok(listing) => listing,
+            Err(source) => {
+                // If the root itself fails, surface the error to the caller
+                // exactly like the non-recursive `list_directory` does — that
+                // way the outer `list` loop can keep `have_output` correct
+                // and not emit a blank-line separator for an empty block.
+                if first {
+                    return Err(Error::Io {
+                        path: target,
+                        source,
+                    });
+                }
+                let _ = writeln!(
+                    stderr,
+                    "{}",
+                    Error::Io {
+                        path: target.clone(),
+                        source,
+                    }
+                );
+                had_error = true;
+                continue;
+            }
+        };
+        // Separator goes between *rendered* blocks; failed targets above
+        // don't count, so we don't leave an orphan blank line behind them.
+        if !first {
+            writeln!(stdout).map_err(stdout_io)?;
+        }
+        first = false;
+        write_path_with_suffix(stdout, &target, b":\n")?;
+        let mut entries = listing.entries;
+        let sense = {
+            let names: Vec<&std::ffi::OsStr> = entries.iter().map(|e| e.name.as_os_str()).collect();
+            caches.sensitivity.sensitivity(&target, &names)
+        };
+        sort::sort_with(&mut entries, sense, options.sort_key, options.reverse);
+        let snapshot = caches.snapshots.for_target(&target);
+        // Decide descent BEFORE rendering so we don't have to revisit the
+        // snapshot lookup later (it can canonicalize, so each call has cost).
+        let mut to_push: Vec<PathBuf> = Vec::new();
+        for entry in &entries {
+            if entry.kind == EntryKind::Directory && should_descend(entry, snapshot, options) {
+                to_push.push(entry.path.clone());
+            }
+        }
+        render_entries(stdout, &entries, &mut caches.owners, snapshot)?;
+        had_error |= report_listing_errors(stderr, &listing.errors);
+        // Push in reverse so the first sorted subdir pops next: depth-first
+        // in the order rendered, matching GNU `ls -R`.
+        for child in to_push.into_iter().rev() {
+            stack.push_front(child);
+        }
+    }
+    Ok(had_error)
+}
+
+fn should_descend(entry: &Entry, snapshot: Option<&Snapshot>, options: ListOptions) -> bool {
+    let is_hidden = entry.name.as_bytes().first() == Some(&b'.');
+    if is_hidden && options.unrestricted < 2 {
+        return false;
+    }
+    if options.unrestricted < 1
+        && snapshot.is_some_and(|s| s.lookup(&entry.path) == PorcelainCode::IGNORED)
+    {
+        return false;
+    }
+    true
 }
 
 fn render_entries(
@@ -269,11 +381,7 @@ fn target_is_missing(entry: &Entry) -> bool {
 // `to_string_lossy`) would replace invalid UTF-8 with U+FFFD and break
 // pipelines. TTY-aware quoting/escaping of control characters in names is a
 // separate concern from byte-fidelity and is not part of this chunk.
-fn write_path_with_suffix(
-    stdout: &mut dyn Write,
-    path: &Path,
-    suffix: &[u8],
-) -> Result<(), Error> {
+fn write_path_with_suffix(stdout: &mut dyn Write, path: &Path, suffix: &[u8]) -> Result<(), Error> {
     stdout
         .write_all(path.as_os_str().as_bytes())
         .map_err(stdout_io)?;
@@ -694,5 +802,322 @@ mod tests {
             &mut err,
         );
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+    }
+
+    #[test]
+    fn recursive_lists_nested_directories_depth_first_with_labels() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = a.join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("leaf"), b"x").unwrap();
+        fs::write(b.join("deep"), b"y").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        let root_label = format!("{}:", dir.path().display());
+        let a_label = format!("{}:", a.display());
+        let b_label = format!("{}:", b.display());
+        let root_at = text.find(&root_label).expect("root label present");
+        let a_at = text.find(&a_label).expect("a label present");
+        let b_at = text.find(&b_label).expect("b label present");
+        assert!(root_at < a_at, "root must precede a:\n{text}");
+        assert!(a_at < b_at, "a must precede b (depth first):\n{text}");
+        assert!(text.contains("leaf"));
+        assert!(text.contains("deep"));
+    }
+
+    #[test]
+    fn recursive_skips_hidden_directory_by_default_but_lists_it() {
+        let dir = tempdir().unwrap();
+        let hidden = dir.path().join(".secret");
+        fs::create_dir(&hidden).unwrap();
+        fs::write(hidden.join("inside"), b"x").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        // The hidden directory row is listed (always-hidden rule), but its
+        // contents are NOT recursed into.
+        assert!(text.contains(".secret"));
+        assert!(!text.contains("inside"), "should not recurse: {text}");
+    }
+
+    #[test]
+    fn double_unrestricted_recurses_into_hidden_directories() {
+        let dir = tempdir().unwrap();
+        let hidden = dir.path().join(".secret");
+        fs::create_dir(&hidden).unwrap();
+        fs::write(hidden.join("inside"), b"x").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-Ruu", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("inside"));
+    }
+
+    #[test]
+    fn recursive_does_not_follow_directory_symlinks() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("inside"), b"x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        // `real/inside` shows once (via real); we shouldn't see a `link:` block.
+        let link_label = format!("{}:", link.display());
+        assert!(
+            !text.contains(&link_label),
+            "should not descend into symlink: {text}"
+        );
+    }
+
+    #[test]
+    fn recursive_reports_subdirectory_error_and_continues() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let good = dir.path().join("good");
+        let locked = dir.path().join("locked");
+        fs::create_dir(&good).unwrap();
+        fs::create_dir(&locked).unwrap();
+        fs::write(good.join("inside"), b"x").unwrap();
+        let mut p = fs::metadata(&locked).unwrap().permissions();
+        p.set_mode(0o000);
+        fs::set_permissions(&locked, p).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+
+        let mut p = fs::metadata(&locked).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&locked, p).unwrap();
+
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+        let err_text = String::from_utf8(err).unwrap();
+        assert!(err_text.contains("locked"));
+        let out_text = String::from_utf8(out).unwrap();
+        assert!(
+            out_text.contains("inside"),
+            "sibling content still rendered: {out_text}"
+        );
+    }
+
+    #[test]
+    fn recursive_skips_gitignored_directory_by_default() {
+        use std::process::Command;
+        let dir = tempdir().unwrap();
+        // Set up a tiny repo with an ignored subdirectory.
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("HOME", dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let ignored = dir.path().join("ignored_dir");
+        fs::create_dir(&ignored).unwrap();
+        fs::write(ignored.join("buried"), b"x").unwrap();
+        fs::write(dir.path().join(".gitignore"), b"ignored_dir/\n").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("ignored_dir"), "row still listed: {text}");
+        assert!(
+            !text.contains("buried"),
+            "must not recurse into ignored: {text}"
+        );
+
+        // With -Ru we should descend into the gitignored directory.
+        let mut out2 = Vec::new();
+        let mut err2 = Vec::new();
+        let code2 = run(
+            os(&["-Ru", dir.path().to_str().unwrap()]),
+            &mut out2,
+            &mut err2,
+        );
+        assert_eq!(code_repr(code2), code_repr(std::process::ExitCode::SUCCESS));
+        let text2 = String::from_utf8(out2).unwrap();
+        assert!(text2.contains("buried"), "-Ru must recurse: {text2}");
+    }
+
+    #[test]
+    fn recursive_reverse_keeps_dfs_between_blocks() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("inner"), b"x").unwrap();
+        fs::write(b.join("inner"), b"y").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-Rr", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        let a_label = format!("{}:", a.display());
+        let b_label = format!("{}:", b.display());
+        let a_at = text.find(&a_label).unwrap();
+        let b_at = text.find(&b_label).unwrap();
+        // Within the root block, -r reverses → b row precedes a row → b: block
+        // is visited first when we pop the DFS stack.
+        assert!(b_at < a_at, "reverse should put b: before a:\n{text}");
+    }
+
+    #[test]
+    fn sort_by_size_orders_largest_first() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("small"), b"x").unwrap();
+        fs::write(dir.path().join("big"), vec![b'x'; 5_000]).unwrap();
+        fs::write(dir.path().join("mid"), vec![b'x'; 500]).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-S", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        let big_at = text.find("big").unwrap();
+        let mid_at = text.find("mid").unwrap();
+        let small_at = text.find("small").unwrap();
+        assert!(big_at < mid_at && mid_at < small_at, "order:\n{text}");
+    }
+
+    #[test]
+    fn recursive_per_child_stat_failure_is_reported_and_continues() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let inner = dir.path().join("inner");
+        fs::create_dir(&inner).unwrap();
+        fs::write(inner.join("child"), b"hi").unwrap();
+        // r-- on the directory itself: readdir returns names, but `lstat` of
+        // each child fails because of the missing +x bit. That feeds the
+        // `listing.errors` accumulation in list_recursive.
+        let mut p = fs::metadata(&inner).unwrap().permissions();
+        p.set_mode(0o400);
+        fs::set_permissions(&inner, p).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+
+        let mut p = fs::metadata(&inner).unwrap().permissions();
+        p.set_mode(0o755);
+        fs::set_permissions(&inner, p).unwrap();
+
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+        let err_text = String::from_utf8(err).unwrap();
+        assert!(
+            err_text.contains("child"),
+            "error mentions child: {err_text}"
+        );
+    }
+
+    #[test]
+    fn file_arg_inside_git_repo_shows_git_column() {
+        use std::process::Command;
+        let dir = tempdir().unwrap();
+        for cmd_args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(cmd_args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("HOME", dir.path())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let file = dir.path().join("tracked");
+        fs::write(&file, b"hi").unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "tracked"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("HOME", dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(os(&[file.to_str().unwrap()]), &mut out, &mut err);
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        // Staged addition gets `A `; covers the `any_git = true` branch in
+        // render_files.
+        assert!(
+            text.contains('A'),
+            "expected git column for staged add: {text}"
+        );
     }
 }

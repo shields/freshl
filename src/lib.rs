@@ -8,13 +8,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub mod args;
+pub mod case;
 pub mod collect;
 pub mod entry;
 pub mod error;
 pub mod format;
 pub mod owner;
+pub mod sort;
 
 use args::{Action, parse};
+use case::{DetectorCache, ProbeDetector};
 use entry::{Entry, EntryKind};
 use error::Error;
 use format::{Row, build_row, compute_widths, render_row};
@@ -69,6 +72,7 @@ fn list(
     let mut have_output = false;
     let mut last_was_dir = false;
     let mut owners = OwnerCache::new(SystemDirectory);
+    let mut sensitivity = DetectorCache::new(ProbeDetector);
 
     for target in targets {
         let entry = match collect::entry_for_path(target) {
@@ -90,7 +94,7 @@ fn list(
         if have_output && (this_is_dir || last_was_dir) {
             writeln!(stdout).map_err(stdout_io)?;
         }
-        match list_target(stdout, stderr, target, multi, &entry, &mut owners) {
+        match list_target(stdout, stderr, target, multi, &entry, &mut owners, &mut sensitivity) {
             Ok(target_had_error) => {
                 had_error |= target_had_error;
                 have_output = true;
@@ -117,6 +121,7 @@ fn list_target(
     show_label: bool,
     entry: &Entry,
     owners: &mut OwnerCache<SystemDirectory>,
+    sensitivity: &mut DetectorCache<ProbeDetector>,
 ) -> Result<bool, Error> {
     if entry.kind != EntryKind::Directory {
         // Print the file's row using the user-supplied path as the name, so
@@ -134,9 +139,11 @@ fn list_target(
         write_path_with_suffix(stdout, target, b":\n")?;
     }
     let mut entries = listing.entries;
-    // Temporary alphabetical sort so chunk 4 output is deterministic; chunk 5
-    // replaces this with a natural-order, dirs-first comparator.
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let sense = {
+        let names: Vec<&std::ffi::OsStr> = entries.iter().map(|e| e.name.as_os_str()).collect();
+        sensitivity.sensitivity(target, &names)
+    };
+    sort::sort(&mut entries, sense);
     render_entries(stdout, &entries, owners)?;
     for (path, source) in &listing.errors {
         let _ = writeln!(

@@ -360,7 +360,10 @@ mod tests {
         let palette = Palette::from_string("ln=35");
         let style = palette.style_for(&entry("broken", EntryKind::Symlink), true);
         let s = format!("{style}");
-        assert!(s.contains("35"), "or→ln fallback should give magenta: {s:?}");
+        assert!(
+            s.contains("35"),
+            "or→ln fallback should give magenta: {s:?}"
+        );
     }
 
     #[test]
@@ -411,9 +414,8 @@ mod tests {
     fn bright_colors_convert_through_anstyle() {
         // SGR 90–97 are the bright foreground colors; pair each with a suffix
         // so the conversion path runs for every BrightX variant.
-        let palette = Palette::from_string(
-            "*.bk=90:*.br=91:*.bg=92:*.by=93:*.bu=94:*.bm=95:*.bc=96:*.bw=97",
-        );
+        let palette =
+            Palette::from_string("*.bk=90:*.br=91:*.bg=92:*.by=93:*.bu=94:*.bm=95:*.bc=96:*.bw=97");
         for (name, code) in [
             ("a.bk", "90"),
             ("a.br", "91"),
@@ -455,6 +457,9 @@ mod tests {
         // anstyle's BLINK effect.
         let palette = Palette::from_string("*.fx=6");
         let style = palette.style_for(&entry("a.fx", EntryKind::RegularFile), false);
-        assert!(format!("{style}").contains('5'), "rapid_blink → anstyle BLINK (SGR 5)");
+        assert!(
+            format!("{style}").contains('5'),
+            "rapid_blink → anstyle BLINK (SGR 5)"
+        );
     }
 }

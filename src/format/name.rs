@@ -143,7 +143,10 @@ mod tests {
         let palette = Palette::from_string("di=01;34");
         let e = entry("d", EntryKind::Directory);
         let dim = as_lossy(&format_name(&palette, &e, true, false));
-        assert!(dim.contains("34"), "blue fg should survive dim overlay: {dim}");
+        assert!(
+            dim.contains("34"),
+            "blue fg should survive dim overlay: {dim}"
+        );
         assert!(dim.contains('2'), "dim effect should be present: {dim}");
     }
 

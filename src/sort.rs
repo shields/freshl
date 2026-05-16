@@ -238,7 +238,10 @@ mod tests {
     fn symlink_to_directory_sorts_with_directories() {
         let link = symlink_to_dir("z_link");
         let file = entry("a_file", EntryKind::RegularFile);
-        assert_eq!(compare(&link, &file, Sensitivity::Sensitive), Ordering::Less);
+        assert_eq!(
+            compare(&link, &file, Sensitivity::Sensitive),
+            Ordering::Less
+        );
         assert_eq!(
             compare(&file, &link, Sensitivity::Sensitive),
             Ordering::Greater
@@ -247,15 +250,24 @@ mod tests {
         // Within the directory group the natural-name rule still applies, so a
         // symlink-to-dir and a real dir interleave alphabetically.
         let real = entry("m_dir", EntryKind::Directory);
-        assert_eq!(compare(&link, &real, Sensitivity::Sensitive), Ordering::Greater);
-        assert_eq!(compare(&real, &link, Sensitivity::Sensitive), Ordering::Less);
+        assert_eq!(
+            compare(&link, &real, Sensitivity::Sensitive),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare(&real, &link, Sensitivity::Sensitive),
+            Ordering::Less
+        );
     }
 
     #[test]
     fn symlink_to_file_sorts_with_files() {
         let link = entry("a_link", EntryKind::Symlink);
         let real = entry("z_dir", EntryKind::Directory);
-        assert_eq!(compare(&real, &link, Sensitivity::Sensitive), Ordering::Less);
+        assert_eq!(
+            compare(&real, &link, Sensitivity::Sensitive),
+            Ordering::Less
+        );
         assert_eq!(
             compare(&link, &real, Sensitivity::Sensitive),
             Ordering::Greater
@@ -271,7 +283,10 @@ mod tests {
             compare(&broken, &file, Sensitivity::Sensitive),
             Ordering::Less
         );
-        assert_eq!(compare(&dir, &broken, Sensitivity::Sensitive), Ordering::Less);
+        assert_eq!(
+            compare(&dir, &broken, Sensitivity::Sensitive),
+            Ordering::Less
+        );
     }
 
     #[test]

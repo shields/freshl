@@ -177,11 +177,7 @@ mod tests {
         let styled = format_time_styled(time, now, dim());
         assert_eq!(
             styled,
-            format!(
-                "{o}2026-{c}05-01{o}T09:40:17Z{c}",
-                o = open(),
-                c = close()
-            ),
+            format!("{o}2026-{c}05-01{o}T09:40:17Z{c}", o = open(), c = close()),
         );
     }
 

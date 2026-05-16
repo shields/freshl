@@ -404,8 +404,7 @@ mod tests {
         let close = format!("{}", dim.render_reset());
         let expected = format!("{open}d 755{close} ");
         assert!(
-            s.windows(expected.len())
-                .any(|w| w == expected.as_bytes()),
+            s.windows(expected.len()).any(|w| w == expected.as_bytes()),
             "row should open dim before 'd', close after '755': {s:?}",
         );
     }
@@ -473,8 +472,7 @@ mod tests {
         let close = format!("{}", dim.render_reset());
         let expected = format!("{open} 1{close} ");
         assert!(
-            s.windows(expected.len())
-                .any(|w| w == expected.as_bytes()),
+            s.windows(expected.len()).any(|w| w == expected.as_bytes()),
             "row should open dim before padded nlink, close after: {s:?}",
         );
     }

@@ -14,6 +14,7 @@ anstream = "1"
 anstyle = "1"
 jiff = "0.2"
 lscolors = { version = "0.21.0", default-features = false }
+rustix = { version = "1", default-features = false, features = ["process", "fs"] }
 uzers = "0.12"
 
 [dependencies.gix]

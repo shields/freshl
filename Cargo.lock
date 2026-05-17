@@ -298,6 +298,7 @@ dependencies = [
  "gix",
  "jiff",
  "lscolors",
+ "rustix",
  "tempfile",
  "uzers",
 ]

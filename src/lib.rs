@@ -37,6 +37,9 @@ struct Caches {
     /// same reference point — no skew if a long listing crosses a minute/hour
     /// boundary mid-render.
     now: SystemTime,
+    /// Process umask captured at startup, used to decide which file/dir
+    /// permissions are "boring" and should be dimmed.
+    umask: u32,
 }
 
 impl Caches {
@@ -47,8 +50,25 @@ impl Caches {
             snapshots: SnapshotCache::new(),
             palette: Palette::from_env(),
             now: SystemTime::now(),
+            umask: read_umask(),
         }
     }
+}
+
+/// POSIX `umask(2)` only has a set-and-return form, so read the current value
+/// by setting it to a known mask and immediately restoring. Safe for freshl
+/// because this runs once at startup before any thread is spawned that could
+/// race a concurrent `open(2)`.
+// `RawMode` (the underlying type of `Mode::bits()`) is `u16` on macOS/BSD and
+// `u32` on Linux; `.into()` widens uniformly. The `useless_conversion` allow
+// covers the Linux identity case.
+#[allow(clippy::useless_conversion)]
+fn read_umask() -> u32 {
+    use rustix::fs::Mode;
+    use rustix::process::umask;
+    let prev = umask(Mode::from_bits_truncate(0o022));
+    let _ = umask(prev);
+    prev.bits().into()
 }
 
 #[must_use]
@@ -209,6 +229,7 @@ fn list_directory(
         &caches.palette,
         snapshot,
         caches.now,
+        caches.umask,
     )?;
     Ok(report_listing_errors(stderr, &listing.errors))
 }
@@ -297,6 +318,7 @@ fn list_recursive(
             &caches.palette,
             snapshot,
             caches.now,
+            caches.umask,
         )?;
         had_error |= report_listing_errors(stderr, &listing.errors);
         // Push in reverse so the first sorted subdir pops next: depth-first
@@ -328,10 +350,11 @@ fn render_entries(
     palette: &Palette,
     snapshot: Option<&Snapshot>,
     now: SystemTime,
+    umask: u32,
 ) -> Result<(), Error> {
     let mut rows: Vec<Row> = entries
         .iter()
-        .map(|e| build_row(e, owners, palette, now))
+        .map(|e| build_row(e, owners, palette, now, umask))
         .collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
         enrich_row(row, entry, palette, snapshot);
@@ -355,8 +378,9 @@ fn render_files(
     let mut rows: Vec<Row> = Vec::with_capacity(entries.len());
     let mut any_git = false;
     let now = caches.now;
+    let umask = caches.umask;
     for entry in entries {
-        let mut row = build_row(entry, &mut caches.owners, &caches.palette, now);
+        let mut row = build_row(entry, &mut caches.owners, &caches.palette, now, umask);
         let snap = caches.snapshots.for_target(&entry.path);
         if snap.is_some() {
             any_git = true;

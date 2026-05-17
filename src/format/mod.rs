@@ -28,8 +28,9 @@ pub struct Row {
     pub kind: char,
     pub mode: String,
     /// Wrap kind+mode in dim escapes at render time when this row's perms
-    /// are the boring default (regular/644, dir/755, symlink/755) — keeps
-    /// the eye on rows with anything unusual.
+    /// match what the process umask would have produced (file = 0o666 &
+    /// ~umask, dir = 0o777 & ~umask) or the platform's symlink default —
+    /// keeps the eye on rows with anything unusual.
     pub dim_mode: bool,
     pub nlink: String,
     /// Wrap `nlink` in dim escapes at render time when the count is 1 — the
@@ -60,6 +61,7 @@ pub fn build_row<D: UserDirectory>(
     owners: &mut OwnerCache<D>,
     palette: &Palette,
     now: SystemTime,
+    umask: u32,
 ) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
     let (size, size_width) = match entry.kind {
@@ -68,7 +70,7 @@ pub fn build_row<D: UserDirectory>(
     };
     let kind = entry.kind.type_char();
     let mode = perms::format_perms(entry.mode);
-    let dim_mode = perms::is_default(kind, &mode);
+    let dim_mode = perms::is_default(entry.kind, entry.mode, umask);
     let dim_group = owners.gid_is_primary(entry.uid, entry.gid);
     Row {
         kind,
@@ -209,7 +211,7 @@ mod tests {
             e.kind = kind;
             e.size = 0;
             e.rdev = rdev;
-            let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
+            let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
             assert_eq!(row.size, expected);
             assert_eq!(row.size_width, expected.len());
             assert_eq!(row.kind, kind_char);
@@ -220,7 +222,13 @@ mod tests {
     fn build_row_populates_basic_fields() {
         let mut owners = OwnerCache::new(Fixed);
         let palette = Palette::empty();
-        let row = build_row(&entry("hi"), &mut owners, &palette, SystemTime::UNIX_EPOCH);
+        let row = build_row(
+            &entry("hi"),
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+        );
         assert_eq!(row.kind, ' ');
         assert_eq!(row.mode, "644");
         assert!(row.dim_mode);
@@ -240,7 +248,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.mode = 0o100_600;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
         assert_eq!(row.mode, "600");
         assert!(!row.dim_mode);
     }
@@ -251,7 +259,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.nlink = 2;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
         assert_eq!(row.nlink, "2");
         assert!(!row.dim_nlink);
     }
@@ -262,7 +270,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.gid = 30;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
         assert!(!row.dim_group);
     }
 
@@ -279,7 +287,13 @@ mod tests {
         }
         let mut owners = OwnerCache::new(NoUser);
         let palette = Palette::empty();
-        let row = build_row(&entry("hi"), &mut owners, &palette, SystemTime::UNIX_EPOCH);
+        let row = build_row(
+            &entry("hi"),
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+        );
         assert!(!row.dim_group);
     }
 
@@ -290,7 +304,7 @@ mod tests {
         let mut e = entry("d");
         e.kind = EntryKind::Directory;
         e.mode = 0o040_755;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH);
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
         assert_eq!(row.kind, 'd');
         assert_eq!(row.mode, "755");
         assert!(row.dim_mode);

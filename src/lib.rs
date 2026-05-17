@@ -878,6 +878,55 @@ mod tests {
     }
 
     #[test]
+    fn recursive_label_write_failure_surfaces_io_error() {
+        // Exercises the `?` on write_path_with_suffix in list_recursive.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("only"), b"hi").unwrap();
+        let mut out = FailingWriter;
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+    }
+
+    #[test]
+    fn recursive_render_failure_surfaces_io_error() {
+        // The label write succeeds (one newline budget) but the first row
+        // newline trips FailOnNewline, exercising the `?` on render_entries
+        // inside list_recursive — the non-recursive path has its own test.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("only"), b"hi").unwrap();
+        let mut out = FailOnNewline::new(1);
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+    }
+
+    #[test]
+    fn recursive_separator_write_failure_surfaces_io_error() {
+        // First iteration writes label + 1 row (2 newlines). Second iteration
+        // hits the inter-block separator writeln (3rd newline) and fails,
+        // exercising the `?` on the separator inside list_recursive.
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let mut out = FailOnNewline::new(2);
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+    }
+
+    #[test]
     fn recursive_lists_nested_directories_depth_first_with_labels() {
         let dir = tempdir().unwrap();
         let a = dir.path().join("a");

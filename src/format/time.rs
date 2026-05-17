@@ -53,18 +53,18 @@ pub fn format_time_styled(time: SystemTime, now: SystemTime, dim: Style) -> Stri
     let plain = format_time(time);
     let bytes = plain.as_bytes();
     let len = bytes.len();
-    let Some(t_pos) = plain.find('T') else {
-        return plain;
-    };
     let past_secs = match now.duration_since(time) {
         Ok(d) => d.as_secs(),
         Err(_) => return plain,
     };
 
-    // Year width is variable (jiff emits more digits for far-future years), so
-    // derive every field from `t_pos`. `-MM-DD` is always 6 bytes before `T`.
-    let year_end = t_pos.saturating_sub(5); // year + `-`
-    let month_end = t_pos.saturating_sub(2); // year + `-` + month + `-`
+    // Year width is variable (jiff zero-pads to 4 digits but can emit more for
+    // out-of-range years), so locate `T` rather than indexing from either end.
+    // The invariant is enforced by `format_time` itself, whose only two return
+    // paths both emit `T` between the date and time fields.
+    let t_pos = plain.find('T').expect("format_time always emits 'T'");
+    let year_end = t_pos - 5; // year + `-`
+    let month_end = t_pos - 2; // year + `-` + month + `-`
 
     let mut mask = vec![false; len];
     mask[t_pos] = true;

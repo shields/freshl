@@ -16,7 +16,42 @@ limitations under the License.
 
 # freshl
 
-A modern replacement for `ls`. One output mode, opinionated defaults, ISO 8601
-UTC timestamps, raw byte counts grouped in clusters of six, and inline git
-status. See [`docs/comparison.md`](docs/comparison.md) for the design and
-[`docs/plan.md`](docs/plan.md) for the build plan.
+A modern replacement for `ls`.
+
+## Behavior
+
+`freshl` supports the greatest hits of `ls` options: `-R`, `-S`, `-t`, `-r`, and
+`-d`.
+
+`-R` ignores gitignored and dotfile dirs, unless with `-u` or `-uu` (à la
+`ripgrep`).
+
+## Display
+
+Color output is configured with `$LS_COLORS`, compatible with GNU `ls`. Apart
+from that, there are _no display options_. You get it my way.
+
+- Integrated Git status.
+- File modes are in octal, e.g., `644` instead of `rw-r--r--`.
+- Timestamps are always UTC.
+- Directories sort first, along with symlinks to directories.
+- On case-insensitive filesystems, such as APFS, sorting is case-insensitive.
+
+There is also context-sensitive dimming to deemphasize less-useful information:
+
+- File modes are dimmed if they are the default for your current `umask`.
+- Groups are dimmed if they are the primary group for that user.
+- If a file size is 1 MB or more, the low-order digits are dimmed in groups of
+  six. For example, a file of size 14142135 would have only `14` undimmed.
+- A contiguous section of the timestamp is undimmed, generally three elements.
+  Future timestamps are fully undimmed.
+
+## Recommended usage
+
+```bash
+if which freshl >/dev/null; then
+    alias l='freshl'
+else
+    alias l='ls -lA'
+fi
+```

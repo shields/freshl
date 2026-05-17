@@ -1,7 +1,10 @@
-.PHONY: build test lint fmt coverage run clean
+.PHONY: build install test lint fmt coverage run clean
 
 build:
 	cargo build --release
+
+install:
+	cargo install --path .
 
 test:
 	cargo test --all-targets

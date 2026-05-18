@@ -18,8 +18,8 @@ limitations under the License.
 
 Project conventions live in
 [`shields/right-answers`](https://github.com/shields/right-answers) — follow
-those by default. Design and build plan: [`docs/comparison.md`](docs/comparison.md)
-and [`docs/plan.md`](docs/plan.md).
+those by default. Design and build plan:
+[`docs/comparison.md`](docs/comparison.md) and [`docs/plan.md`](docs/plan.md).
 
 ## Commit workflow
 

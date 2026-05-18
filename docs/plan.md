@@ -17,8 +17,8 @@ limitations under the License.
 # Implementation plan
 
 The design is locked in [comparison.md](comparison.md). This document is the
-build plan: project scaffold, module layout, dependencies, build order, and
-test strategy.
+build plan: project scaffold, module layout, dependencies, build order, and test
+strategy.
 
 ## Hard requirement: 100 % test coverage
 
@@ -26,10 +26,11 @@ Coverage is gated, not aspirational. Every line that ships must be exercised by
 a test, with `coverage(off)` permitted only on `main` (per the
 `right-answers/rust.md` convention). Concretely:
 
-- `make coverage` runs `cargo +nightly llvm-cov --cfg coverage_nightly --fail-under-lines 100`
-  and is a CI-blocking job.
-- A PR that drops coverage below 100 % fails the same way a lint or test
-  failure does. There is no "we'll backfill later" branch.
+- `make coverage` runs
+  `cargo +nightly llvm-cov --cfg coverage_nightly --fail-under-lines 100` and is
+  a CI-blocking job.
+- A PR that drops coverage below 100 % fails the same way a lint or test failure
+  does. There is no "we'll backfill later" branch.
 - New code lands with its tests in the same commit. If a code path is hard to
   cover (FFI fallbacks, OS-specific branches), the design changes to make it
   injectable rather than the coverage gate getting lowered.
@@ -64,9 +65,8 @@ fn main() -> ExitCode { … }
 workflow invokes nightly explicitly (`cargo +nightly llvm-cov`).
 
 **`Makefile`** — `build`, `test`, `lint`, `fmt`, `coverage`, `run`. `lint` runs
-`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`.
-`coverage` runs `cargo +nightly llvm-cov --cfg coverage_nightly
---fail-under-lines 100`.
+`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`. `coverage`
+runs `cargo +nightly llvm-cov --cfg coverage_nightly --fail-under-lines 100`.
 
 **`lefthook.yml`** — prettier on staged `*.md`, matching `right-answers`.
 
@@ -77,13 +77,13 @@ separate job that calls `make coverage` on the nightly toolchain). Both must
 pass for merge.
 
 **`.github/renovate.json5`** — `config:best-practices`,
-`:semanticCommitsDisabled`, `platformAutomerge`, automerge for non-major and
-dev deps.
+`:semanticCommitsDisabled`, `platformAutomerge`, automerge for non-major and dev
+deps.
 
 **`.gitignore`** — `target/`, `*.profraw`, `lcov.info`.
 
-**`README.md`** — one paragraph plus a link to the design doc. No
-"why I built this," no installation theatre.
+**`README.md`** — one paragraph plus a link to the design doc. No "why I built
+this," no installation theatre.
 
 ## 1. Dependencies (initial picks)
 
@@ -128,22 +128,21 @@ src/
 
 ## 3. Build order
 
-Each step is a small commit with tests in the same commit. Coverage stays at
-100 % at every step; if a step would drop it, fix the gap before moving on.
+Each step is a small commit with tests in the same commit. Coverage stays at 100
+% at every step; if a step would drop it, fix the gap before moving on.
 
-1. **Scaffold** — `cargo init --bin`, lint table, Makefile, `main.rs`
-   returning `ExitCode::SUCCESS`, CI smoke job. Verification:
-   `make lint test coverage` green.
-2. **Arg parsing** (`args.rs`) — manual loop over `std::env::args()`.
-   Recognises `--help`, `--version`, `--`, plus positional paths. On unknown
-   flag, error with exit 2 (matches `ls`).
+1. **Scaffold** — `cargo init --bin`, lint table, Makefile, `main.rs` returning
+   `ExitCode::SUCCESS`, CI smoke job. Verification: `make lint test coverage`
+   green.
+2. **Arg parsing** (`args.rs`) — manual loop over `std::env::args()`. Recognises
+   `--help`, `--version`, `--`, plus positional paths. On unknown flag, error
+   with exit 2 (matches `ls`).
 3. **Entry collection** (`entry.rs`, `collect.rs`) — `readdir` returns
-   `Vec<Entry>` with `name`, `path`, `kind`, mode, nlink, uid, gid, size,
-   mtime, symlink target. Always-hidden (no filter). Uses
-   `std::fs::symlink_metadata` so symlinks are not followed.
+   `Vec<Entry>` with `name`, `path`, `kind`, mode, nlink, uid, gid, size, mtime,
+   symlink target. Always-hidden (no filter). Uses `std::fs::symlink_metadata`
+   so symlinks are not followed.
 4. **Owner resolution** (`owner.rs`) — `uzers::get_user_by_uid` with a
-   `HashMap<u32, OsString>` cache, numeric fallback when lookup returns
-   `None`.
+   `HashMap<u32, OsString>` cache, numeric fallback when lookup returns `None`.
 5. **Case detection** (`case.rs`) — `rustix::fs::pathconf(_, PC_CASE_SENSITIVE)`
    on macOS; on Linux query `statx` for `STATX_ATTR_CASE_FOLD` if the file has
    it set (default = sensitive). Cache per-directory.
@@ -153,13 +152,13 @@ Each step is a small commit with tests in the same commit. Coverage stays at
 7. **Formatting — non-git path**:
    - `perms.rs`: `(mode & 0o777)` → `"{:o}"`.
    - `size.rs`: emit raw digits, right-aligned to the widest entry in the
-     listing. Digits past the leading six-digit-aligned group are dimmed so
-     the megabyte/terabyte boundary is visible without altering the text.
+     listing. Digits past the leading six-digit-aligned group are dimmed so the
+     megabyte/terabyte boundary is visible without altering the text.
    - `time.rs`:
      `jiff::Timestamp::from_second(secs).strftime("%Y-%m-%dT%H:%M:%SZ")`.
      Styling: split at `T` and `Z`, dim those two characters with `anstyle`.
-   - `name.rs`: ANSI color by kind. Symlinks rendered `name → target` with
-     the arrow dimmed; target red if broken (lstat of target fails).
+   - `name.rs`: ANSI color by kind. Symlinks rendered `name → target` with the
+     arrow dimmed; target red if broken (lstat of target fails).
    - Column widths computed in one pass over the rows after collection.
    - `mod.rs`: stitches columns with single-space separators, in order: type ·
      mode · nlink · owner · group · size · timestamp · (git) · name.
@@ -175,8 +174,8 @@ Each step is a small commit with tests in the same commit. Coverage stays at
    - For each entry inside a repo, classify with one porcelain-equivalent
      snapshot. Map to two-char code: `M` / `A` / `D` / `R` / `C` / `T` / `U` /
      `??` / `!!`. Tracked + clean → `✓` (left column, right blank).
-   - Ignored files: filename rendered with `Style::dim()` in addition to `!!`
-     in the git column.
+   - Ignored files: filename rendered with `Style::dim()` in addition to `!!` in
+     the git column.
 10. **Coverage hardening** — by this point coverage has been enforced at every
     step. Final pass: review any branches that needed contortion to cover, and
     refactor where the test shape is uglier than the production shape.
@@ -187,12 +186,12 @@ Each step is a small commit with tests in the same commit. Coverage stays at
 
 - `format::perms`: `0o755` → `"755"`; `0o644` → `"644"`; `0o7777` → `"7777"`
   (sticky / setuid only when set).
-- `format::size`: 0 → `"0"`, 123 → `"123"`, 999_999 → `"999999"`,
-  1_000_000 → `"1000000"` with `000000` dimmed, 1_234_567_890 →
-  `"1234567890"` with `567890` dimmed, 999_999_999_999 → `"999999999999"`
-  with the trailing six digits dimmed.
-- `format::time`: fixed `SystemTime` epoch → expected ISO string. Test that
-  `T` and `Z` get the dim style attached.
+- `format::size`: 0 → `"0"`, 123 → `"123"`, 999_999 → `"999999"`, 1_000_000 →
+  `"1000000"` with `000000` dimmed, 1_234_567_890 → `"1234567890"` with `567890`
+  dimmed, 999_999_999_999 → `"999999999999"` with the trailing six digits
+  dimmed.
+- `format::time`: fixed `SystemTime` epoch → expected ISO string. Test that `T`
+  and `Z` get the dim style attached.
 - `sort`: natural-order ordering across a fixture name list; verify dirs-first
   regardless of casing.
 - `case`: behaviour-tested via a temporary HFS+ image is overkill; instead
@@ -205,16 +204,16 @@ Each step is a small commit with tests in the same commit. Coverage stays at
 - Build a tempdir with: regular file, hidden file, directory, broken symlink,
   valid symlink. Run the binary; assert exact output for stable columns and
   pattern-match the mtime column.
-- Repeat inside a git repo (constructed via `gix`) covering: untracked,
-  ignored, staged-modified, worktree-modified, tracked-clean. Assert each
-  row's git column.
+- Repeat inside a git repo (constructed via `gix`) covering: untracked, ignored,
+  staged-modified, worktree-modified, tracked-clean. Assert each row's git
+  column.
 - Multi-path: pass two dirs; assert label lines and section separation.
 - File arg: pass a single file path; assert one row, no label.
 - `NO_COLOR=1`: assert no ANSI escapes anywhere.
 
 **Coverage gate:** `--fail-under-lines 100`. `error.rs` paths covered by
-negative tests (nonexistent path → exit 2). Any module that resists 100 %
-gets refactored, not exempted.
+negative tests (nonexistent path → exit 2). Any module that resists 100 % gets
+refactored, not exempted.
 
 ## 5. Risks and open items
 
@@ -224,8 +223,8 @@ gets refactored, not exempted.
 - **`gix` status performance** on large repos: acceptable for v1. If it
   dominates wall time, scope to "stat the index, skip the workdir scan" later.
   Not optimising on day one.
-- **Owner column width** on systems with long usernames: column auto-sizes
-  per listing; no hard cap.
+- **Owner column width** on systems with long usernames: column auto-sizes per
+  listing; no hard cap.
 - **`uzers`** is a fork of the unmaintained `users` crate — confirm it still
   publishes. If not, switch to a tiny hand-rolled `getpwuid` / `getgrgid`
   wrapper via `rustix` (still no `unsafe`).
@@ -238,15 +237,15 @@ GNU ls sort and recursion flags plus a ripgrep-style escalation modifier:
 - `-S` (size, largest first) and `-t` (mtime, newest first) extend `sort.rs`
   with a `SortKey` enum and a keyed comparator. Both keep directories grouped
   first; the key only controls within-group order.
-- `-r` reverses the within-group order via `Ordering::reverse` (preserving
-  sort stability), still without disturbing the dirs/files split.
+- `-r` reverses the within-group order via `Ordering::reverse` (preserving sort
+  stability), still without disturbing the dirs/files split.
 - `-R` introduces depth-first recursion driven from `lib.rs`. Each visited
   directory is rendered as its own labeled block. Symlinks to directories are
   never followed.
-- `-u` / `-uu` gate the descent: by default `-R` skips hidden (dot-prefix)
-  and gitignored directories; `-u` enables gitignored descent; `-uu` enables
-  hidden descent as well. The rows are still listed in every case — only the
-  descent is gated.
+- `-u` / `-uu` gate the descent: by default `-R` skips hidden (dot-prefix) and
+  gitignored directories; `-u` enables gitignored descent; `-uu` enables hidden
+  descent as well. The rows are still listed in every case — only the descent is
+  gated.
 
 Short flags may be bundled (`-Rt`, `-Sr`, `-Ruu`, …). Coverage for every new
 branch lands with the implementation.
@@ -254,7 +253,7 @@ branch lands with the implementation.
 ## 6. First commit after approval
 
 Scaffold only (step 0 from § 3): `cargo init`, lint table, Makefile, CI
-workflow, lefthook, renovate, stub `main()`. `make lint test coverage` must
-pass before the commit lands — 100 % coverage on a do-nothing binary is the
-easy case, and the gate is in place from commit one. Subsequent commits each
-add one numbered step from the build order.
+workflow, lefthook, renovate, stub `main()`. `make lint test coverage` must pass
+before the commit lands — 100 % coverage on a do-nothing binary is the easy
+case, and the gate is in place from commit one. Subsequent commits each add one
+numbered step from the build order.

@@ -16,3 +16,9 @@ pre-commit:
   commands:
     lint:
       run: make lint
+    # Coverage runs on every commit (not pre-push) because CI gates on 100%
+    # line coverage: catching a regression at commit time avoids a CI round
+    # trip. cargo-llvm-cov uses target/llvm-cov-target/, so this does not
+    # invalidate the normal dev `target/` cache between commits.
+    coverage:
+      run: make coverage

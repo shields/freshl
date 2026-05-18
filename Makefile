@@ -14,6 +14,14 @@
 
 .PHONY: build install test lint fmt coverage run clean
 
+# Override to pin to a specific nightly date (e.g. nightly-2026-04-12) when a
+# bleeding-edge nightly destabilises llvm-cov instrumentation.
+NIGHTLY ?= nightly
+
+# Override to swap the Markdown formatter front-end (e.g. PRETTIER='npx --yes
+# prettier' in CI where bun is not installed).
+PRETTIER ?= bunx prettier
+
 build:
 	cargo build --release
 
@@ -26,16 +34,16 @@ test:
 lint:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
-	bunx prettier --check '**/*.md'
+	$(PRETTIER) --check '**/*.md'
 
 fmt:
 	cargo fmt
-	bunx prettier --write '**/*.md'
+	$(PRETTIER) --write '**/*.md'
 
 # cargo-llvm-cov auto-sets cfg(coverage_nightly) on nightly; passing --cfg
 # explicitly is rejected. Do not add --cfg coverage_nightly here.
 coverage:
-	cargo +nightly llvm-cov --fail-under-lines 100
+	cargo +$(NIGHTLY) llvm-cov --fail-under-lines 100
 
 run:
 	cargo run --release --

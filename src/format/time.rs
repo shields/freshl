@@ -36,17 +36,24 @@ const DAY: u64 = 24 * HOUR;
 // visually — this tier is a soft age cue, not a precise calendar comparison.
 const YEAR: u64 = 365 * DAY;
 
-// Stale timestamps fade progressively by age so the eye lands on what's fresh.
-// Date dim always cascades from the left so the bright remainder is a single
-// run (no "bright middle" between two dim fields):
-//   * last 24 hours → year and month (with their trailing hyphens)
-//   * 24h–~1 year  → year only (with its trailing hyphen)
-//   * ≥ ~1 year → date stays fully bright (the differing date is the headline)
-// The time portion fades in two steps: `:SS` once the row is at least an hour
-// old; the rest of `HH:MM:SS` once it's at least a day old. The `T` separator
-// and trailing `Z` are dim too while the row is in the past — they carry no
-// information for past rows — but a future mtime renders fully bright so it
-// stands out as anomalous.
+/// Stale timestamps fade progressively by age so the eye lands on what's fresh.
+///
+/// Date dim always cascades from the left so the bright remainder is a single
+/// run (no "bright middle" between two dim fields):
+///   * last 24 hours → year and month (with their trailing hyphens)
+///   * 24h–~1 year  → year only (with its trailing hyphen)
+///   * ≥ ~1 year → date stays fully bright (the differing date is the headline)
+///
+/// The time portion fades in two steps: `:SS` once the row is at least an hour
+/// old; the rest of `HH:MM:SS` once it's at least a day old. The `T` separator
+/// and trailing `Z` are dim too while the row is in the past — they carry no
+/// information for past rows — but a future mtime renders fully bright so it
+/// stands out as anomalous.
+///
+/// # Panics
+///
+/// Panics if `format_time`'s output lacks `T` between the date and time fields.
+/// This never happens: both of its return paths emit `T`.
 #[must_use]
 pub fn format_time_styled(time: SystemTime, now: SystemTime, dim: Style) -> String {
     use std::fmt::Write;

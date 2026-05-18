@@ -927,6 +927,31 @@ mod tests {
     }
 
     #[test]
+    fn recursive_unreadable_root_surfaces_io_error() {
+        // Exercises the `first` branch in list_recursive that returns Err
+        // when the root itself fails to read on the first iteration.
+        use std::os::unix::fs::PermissionsExt;
+        // Restore perms on drop so an assert panic doesn't leak a 0o000
+        // directory that tempdir's cleanup can't remove.
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+        }
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = Restore(locked.clone());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(os(&["-R", locked.to_str().unwrap()]), &mut out, &mut err);
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(1)));
+    }
+
+    #[test]
     fn recursive_lists_nested_directories_depth_first_with_labels() {
         let dir = tempdir().unwrap();
         let a = dir.path().join("a");

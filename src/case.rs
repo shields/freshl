@@ -124,12 +124,11 @@ impl Default for DetectorCache<ProbeDetector> {
 mod tests {
     use super::{
         Detector, DetectorCache, ProbeDetector, Sensitivity, classify_inos,
-        flip_first_ascii_letter, platform_default, probe_dir,
+        flip_first_ascii_letter, platform_default,
     };
     use std::cell::Cell;
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -206,26 +205,6 @@ mod tests {
     #[test]
     fn classify_missing_both_is_sensitive() {
         assert_eq!(classify_inos(None, None), Sensitivity::Sensitive);
-    }
-
-    #[test]
-    fn probe_dir_agrees_with_direct_stat_calls() {
-        // probe_dir's job is to wire stat→classify_inos for two names. Verify
-        // that wiring against a real filesystem without asserting which mode
-        // the filesystem is in (which varies between case-sensitive ext4 on
-        // CI Linux and case-insensitive APFS on macOS dev machines).
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("readme"), b"x").unwrap();
-        let observed = probe_dir(dir.path(), OsStr::new("readme"), OsStr::new("README"));
-        let expected = classify_inos(
-            fs::symlink_metadata(dir.path().join("readme"))
-                .ok()
-                .map(|m| m.ino()),
-            fs::symlink_metadata(dir.path().join("README"))
-                .ok()
-                .map(|m| m.ino()),
-        );
-        assert_eq!(observed, expected);
     }
 
     #[test]

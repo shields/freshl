@@ -21,6 +21,9 @@ use crate::sort::SortKey;
 pub struct ListOptions {
     pub recursive: bool,
     pub sort_key: SortKey,
+    /// Each `-r` toggles this; an even count is a no-op. The flag flips
+    /// the within-group order: alphabetical → reverse for the default
+    /// name sort, ascending → descending for `-S` and `-t`.
     pub reverse: bool,
     /// Ripgrep-style escalation gate for `-R` descent.
     ///   0 — skip hidden and gitignored directories (default)
@@ -58,9 +61,10 @@ UTC, optional git status, name. Hidden files are always listed.
 
 Options:
   -R         Recurse into directories (depth-first).
-  -S         Sort by size, largest first.
-  -t         Sort by mtime, newest first.
-  -r         Reverse the resulting order. Directories still group first.
+  -S         Sort by size, smallest first (largest at the bottom).
+  -t         Sort by mtime, oldest first (newest at the bottom).
+  -r         Toggle the within-group order; repeat to undo (`-rrrr` is a
+             no-op). Directories still group first.
   -u         Recurse into gitignored directories (with -R). Repeat (-uu) to
              also recurse into hidden directories.
   -d         List directories themselves, not their contents. Suppresses -R.
@@ -112,7 +116,7 @@ where
                     b'R' => options.recursive = true,
                     b'S' => options.sort_key = SortKey::Size,
                     b't' => options.sort_key = SortKey::Time,
-                    b'r' => options.reverse = true,
+                    b'r' => options.reverse = !options.reverse,
                     b'u' => options.unrestricted = options.unrestricted.saturating_add(1).min(2),
                     b'd' => options.directory = true,
                     _ => {
@@ -271,6 +275,50 @@ mod tests {
         assert_eq!(
             parse(args(&["-r"])),
             Ok(list_with(ListOptions {
+                reverse: true,
+                ..ListOptions::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn double_r_cancels_reverse() {
+        assert_eq!(parse(args(&["-rr"])), Ok(list_with(ListOptions::default())));
+    }
+
+    #[test]
+    fn triple_r_leaves_reverse_set() {
+        assert_eq!(
+            parse(args(&["-rrr"])),
+            Ok(list_with(ListOptions {
+                reverse: true,
+                ..ListOptions::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn quadruple_r_is_a_noop() {
+        assert_eq!(
+            parse(args(&["-rrrr"])),
+            Ok(list_with(ListOptions::default()))
+        );
+    }
+
+    #[test]
+    fn separate_r_args_toggle_independently() {
+        assert_eq!(
+            parse(args(&["-r", "-r"])),
+            Ok(list_with(ListOptions::default()))
+        );
+    }
+
+    #[test]
+    fn rt_cluster_sets_reverse_with_time_key() {
+        assert_eq!(
+            parse(args(&["-rt"])),
+            Ok(list_with(ListOptions {
+                sort_key: SortKey::Time,
                 reverse: true,
                 ..ListOptions::default()
             }))

@@ -40,6 +40,15 @@ fn code_repr(code: ExitCode) -> String {
     format!("{code:?}")
 }
 
+fn set_mtime(path: &Path, time: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
 fn init_repo(dir: &Path) {
     run_git(dir, &["init", "-q", "-b", "main"]);
 }
@@ -397,25 +406,24 @@ fn run_args(items: &[&str]) -> (ExitCode, String, String) {
 }
 
 #[test]
-fn sort_by_size_orders_largest_first_end_to_end() {
+fn sort_by_size_puts_largest_at_bottom_end_to_end() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("small"), b"x").unwrap();
     fs::write(dir.path().join("big"), vec![b'x'; 9_000]).unwrap();
     fs::write(dir.path().join("mid"), vec![b'x'; 900]).unwrap();
     let (code, out, _err) = run_args(&["-S", dir.path().to_str().unwrap()]);
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
-    let big_at = out.find("big").unwrap();
-    let mid_at = out.find("mid").unwrap();
     let small_at = out.find("small").unwrap();
+    let mid_at = out.find("mid").unwrap();
+    let big_at = out.find("big").unwrap();
     assert!(
-        big_at < mid_at && mid_at < small_at,
+        small_at < mid_at && mid_at < big_at,
         "ordering wrong:\n{out}"
     );
 }
 
 #[test]
-fn sort_by_time_orders_newest_first_end_to_end() {
-    use std::fs::File;
+fn sort_by_time_puts_newest_at_bottom_end_to_end() {
     use std::time::{Duration, SystemTime};
     let dir = tempdir().unwrap();
     let oldest = dir.path().join("oldest");
@@ -425,32 +433,17 @@ fn sort_by_time_orders_newest_first_end_to_end() {
     fs::write(&middle, b"y").unwrap();
     fs::write(&newest, b"z").unwrap();
     let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    File::options()
-        .write(true)
-        .open(&oldest)
-        .unwrap()
-        .set_modified(base)
-        .unwrap();
-    File::options()
-        .write(true)
-        .open(&middle)
-        .unwrap()
-        .set_modified(base + Duration::from_secs(100))
-        .unwrap();
-    File::options()
-        .write(true)
-        .open(&newest)
-        .unwrap()
-        .set_modified(base + Duration::from_secs(200))
-        .unwrap();
+    set_mtime(&oldest, base);
+    set_mtime(&middle, base + Duration::from_secs(100));
+    set_mtime(&newest, base + Duration::from_secs(200));
 
     let (code, out, _err) = run_args(&["-t", dir.path().to_str().unwrap()]);
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
-    let newest_at = out.find("newest").unwrap();
-    let middle_at = out.find("middle").unwrap();
     let oldest_at = out.find("oldest").unwrap();
+    let middle_at = out.find("middle").unwrap();
+    let newest_at = out.find("newest").unwrap();
     assert!(
-        newest_at < middle_at && middle_at < oldest_at,
+        oldest_at < middle_at && middle_at < newest_at,
         "ordering wrong:\n{out}"
     );
 }
@@ -514,17 +507,17 @@ fn unknown_letter_in_cluster_exits_two() {
 #[test]
 fn size_sort_applies_to_top_level_file_args() {
     let dir = tempdir().unwrap();
-    let small = dir.path().join("aaa_small");
-    let big = dir.path().join("zzz_big");
+    let small = dir.path().join("zzz_small");
+    let big = dir.path().join("aaa_big");
     fs::write(&small, b"x").unwrap();
     fs::write(&big, vec![b'x'; 9_000]).unwrap();
     let (code, out, _err) = run_args(&["-S", small.to_str().unwrap(), big.to_str().unwrap()]);
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
-    // Without -S the alphabetical default would put aaa_small first; -S
-    // must reorder so the larger file appears first.
-    let big_at = out.find("zzz_big").unwrap();
-    let small_at = out.find("aaa_small").unwrap();
-    assert!(big_at < small_at, "top-level -S did not sort:\n{out}");
+    // Without -S the alphabetical default would put aaa_big first; -S
+    // (smallest-first) must reorder so the smaller file appears first.
+    let small_at = out.find("zzz_small").unwrap();
+    let big_at = out.find("aaa_big").unwrap();
+    assert!(small_at < big_at, "top-level -S did not sort:\n{out}");
 }
 
 #[test]
@@ -585,6 +578,44 @@ fn bundled_short_flag_cluster_parses_and_lists() {
     fs::write(dir.path().join("one"), b"x").unwrap();
     let (code, _out, _err) = run_args(&["-rSt", dir.path().to_str().unwrap()]);
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+}
+
+#[test]
+fn quadruple_r_is_a_noop_end_to_end() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a"), b"x").unwrap();
+    fs::write(dir.path().join("b"), b"x").unwrap();
+    let (_, plain, _) = run_args(&[dir.path().to_str().unwrap()]);
+    let (_, quad, _) = run_args(&["-rrrr", dir.path().to_str().unwrap()]);
+    assert_eq!(plain, quad);
+}
+
+#[test]
+fn rt_puts_oldest_at_bottom_end_to_end() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempdir().unwrap();
+    let oldest = dir.path().join("oldest");
+    let newest = dir.path().join("newest");
+    fs::write(&oldest, b"x").unwrap();
+    fs::write(&newest, b"y").unwrap();
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    set_mtime(&oldest, base);
+    set_mtime(&newest, base + Duration::from_secs(200));
+    let (code, out, _err) = run_args(&["-rt", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    let newest_at = out.find("newest").unwrap();
+    let oldest_at = out.find("oldest").unwrap();
+    assert!(newest_at < oldest_at, "oldest should be last:\n{out}");
+}
+
+#[test]
+fn double_r_with_size_equals_size_alone_end_to_end() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("a"), b"x").unwrap();
+    fs::write(dir.path().join("b"), vec![b'x'; 100]).unwrap();
+    let (_, single, _) = run_args(&["-S", dir.path().to_str().unwrap()]);
+    let (_, doubled, _) = run_args(&["-rrS", dir.path().to_str().unwrap()]);
+    assert_eq!(single, doubled);
 }
 
 #[test]

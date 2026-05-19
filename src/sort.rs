@@ -41,15 +41,17 @@ fn compare_digit_runs(a: &[u8], b: &[u8]) -> Ordering {
 fn compare_within_group(a: &Entry, b: &Entry, sensitivity: Sensitivity, key: SortKey) -> Ordering {
     match key {
         SortKey::Name => natural_cmp(&a.name, &b.name, sensitivity),
-        // Size and Time descend by default (largest / newest first); tie-break
-        // with natural name order so equal values stay readable.
-        SortKey::Size => b
+        // Size and Time ascend by default (smallest / oldest first), so
+        // the largest / newest entries land at the bottom of the output.
+        // `-r` flips this for users who want ls-style descending order.
+        // Tie-break with natural name order so equal values stay readable.
+        SortKey::Size => a
             .size
-            .cmp(&a.size)
+            .cmp(&b.size)
             .then_with(|| natural_cmp(&a.name, &b.name, sensitivity)),
-        SortKey::Time => b
+        SortKey::Time => a
             .mtime
-            .cmp(&a.mtime)
+            .cmp(&b.mtime)
             .then_with(|| natural_cmp(&a.name, &b.name, sensitivity)),
     }
 }
@@ -330,25 +332,25 @@ mod tests {
     }
 
     #[test]
-    fn size_key_sorts_files_largest_first_with_name_tiebreak() {
+    fn size_key_sorts_files_smallest_first_with_name_tiebreak() {
         let mut v = vec![
             file_with_size("alpha", 100),
             file_with_size("zeta", 999),
             file_with_size("beta", 100),
         ];
         sort_with(&mut v, Sensitivity::Sensitive, SortKey::Size, false);
-        assert_eq!(names(&v), vec!["zeta", "alpha", "beta"]);
+        assert_eq!(names(&v), vec!["alpha", "beta", "zeta"]);
     }
 
     #[test]
-    fn time_key_sorts_files_newest_first_with_name_tiebreak() {
+    fn time_key_sorts_files_oldest_first_with_name_tiebreak() {
         let mut v = vec![
             file_with_mtime("alpha", 100),
             file_with_mtime("zeta", 999),
             file_with_mtime("beta", 100),
         ];
         sort_with(&mut v, Sensitivity::Sensitive, SortKey::Time, false);
-        assert_eq!(names(&v), vec!["zeta", "alpha", "beta"]);
+        assert_eq!(names(&v), vec!["alpha", "beta", "zeta"]);
     }
 
     #[test]
@@ -391,25 +393,25 @@ mod tests {
     }
 
     #[test]
-    fn reverse_with_size_yields_ascending_within_files() {
+    fn reverse_with_size_yields_descending_within_files() {
         let mut v = vec![
             file_with_size("small", 1),
             file_with_size("mid", 100),
             file_with_size("big", 9_999),
         ];
         sort_with(&mut v, Sensitivity::Sensitive, SortKey::Size, true);
-        assert_eq!(names(&v), vec!["small", "mid", "big"]);
+        assert_eq!(names(&v), vec!["big", "mid", "small"]);
     }
 
     #[test]
-    fn reverse_with_time_yields_oldest_first_within_files() {
+    fn reverse_with_time_yields_newest_first_within_files() {
         let mut v = vec![
             file_with_mtime("old", 1),
             file_with_mtime("mid", 100),
             file_with_mtime("new", 9_999),
         ];
         sort_with(&mut v, Sensitivity::Sensitive, SortKey::Time, true);
-        assert_eq!(names(&v), vec!["old", "mid", "new"]);
+        assert_eq!(names(&v), vec!["new", "mid", "old"]);
     }
 
     #[test]

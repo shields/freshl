@@ -23,6 +23,11 @@ A modern replacement for `ls`.
 `freshl` supports the greatest hits of `ls` options: `-R`, `-S`, `-t`, `-r`, and
 `-d`.
 
+Unlike `ls`, `-S` and `-t` put the largest/newest files at the bottom of the
+output. Also unlike `ls`, you can use `-r` again to double-reverse: `-rt` will
+output the oldest files last. `-rrrr` will have no effect but is amusingly
+piratical.
+
 `-R` ignores gitignored and dotfile dirs, unless with `-u` or `-uu` (à la
 `ripgrep`).
 

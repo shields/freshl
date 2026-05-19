@@ -1172,7 +1172,7 @@ mod tests {
     }
 
     #[test]
-    fn sort_by_size_orders_largest_first() {
+    fn sort_by_size_puts_largest_at_bottom() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("small"), b"x").unwrap();
         fs::write(dir.path().join("big"), vec![b'x'; 5_000]).unwrap();
@@ -1187,10 +1187,10 @@ mod tests {
         );
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
-        let big_at = text.find("big").unwrap();
-        let mid_at = text.find("mid").unwrap();
         let small_at = text.find("small").unwrap();
-        assert!(big_at < mid_at && mid_at < small_at, "order:\n{text}");
+        let mid_at = text.find("mid").unwrap();
+        let big_at = text.find("big").unwrap();
+        assert!(small_at < mid_at && mid_at < big_at, "order:\n{text}");
     }
 
     #[test]

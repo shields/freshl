@@ -93,6 +93,17 @@ impl Palette {
             })
     }
 
+    /// `ln` indicator's style. Used by the chain renderer for the left side
+    /// of `name → target`, where the entry's `kind` has been reclassified to
+    /// the target's kind so `style_for` would no longer return the symlink
+    /// style.
+    #[must_use]
+    pub fn style_for_symlink(&self) -> Style {
+        self.inner
+            .style_for_indicator(Indicator::SymbolicLink)
+            .map_or_else(Style::new, to_anstyle)
+    }
+
     fn indicator_for(&self, entry: &Entry, target_missing: bool) -> Indicator {
         match entry.kind {
             EntryKind::Directory => self.dir_indicator(entry.mode),
@@ -233,9 +244,9 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
-            symlink_target_is_dir: false,
             dev: 0,
             ino: 0,
+            follow_chain: Vec::new(),
         }
     }
 

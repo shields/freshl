@@ -38,10 +38,6 @@ fn compare_digit_runs(a: &[u8], b: &[u8]) -> Ordering {
     a_sig.len().cmp(&b_sig.len()).then_with(|| a_sig.cmp(b_sig))
 }
 
-fn sorts_as_directory(e: &Entry) -> bool {
-    e.kind == EntryKind::Directory || e.symlink_target_is_dir
-}
-
 fn compare_within_group(a: &Entry, b: &Entry, sensitivity: Sensitivity, key: SortKey) -> Ordering {
     match key {
         SortKey::Name => natural_cmp(&a.name, &b.name, sensitivity),
@@ -60,7 +56,10 @@ fn compare_within_group(a: &Entry, b: &Entry, sensitivity: Sensitivity, key: Sor
 
 #[must_use]
 pub fn compare_by(a: &Entry, b: &Entry, sensitivity: Sensitivity, key: SortKey) -> Ordering {
-    match (sorts_as_directory(a), sorts_as_directory(b)) {
+    match (
+        a.kind == EntryKind::Directory,
+        b.kind == EntryKind::Directory,
+    ) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
         _ => compare_within_group(a, b, sensitivity, key),
@@ -76,8 +75,8 @@ pub fn sort_with(entries: &mut [Entry], sensitivity: Sensitivity, key: SortKey, 
     // -r reverses the within-group order only; directories stay grouped at
     // the top regardless of the requested key.
     entries.sort_by(|a, b| {
-        let a_dir = sorts_as_directory(a);
-        let b_dir = sorts_as_directory(b);
+        let a_dir = a.kind == EntryKind::Directory;
+        let b_dir = b.kind == EntryKind::Directory;
         match (a_dir, b_dir) {
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
@@ -171,16 +170,9 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
-            symlink_target_is_dir: false,
             dev: 0,
             ino: 0,
-        }
-    }
-
-    fn symlink_to_dir(name: &str) -> Entry {
-        Entry {
-            symlink_target_is_dir: true,
-            ..entry(name, EntryKind::Symlink)
+            follow_chain: Vec::new(),
         }
     }
 
@@ -251,32 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn symlink_to_directory_sorts_with_directories() {
-        let link = symlink_to_dir("z_link");
-        let file = entry("a_file", EntryKind::RegularFile);
-        assert_eq!(
-            compare(&link, &file, Sensitivity::Sensitive),
-            Ordering::Less
-        );
-        assert_eq!(
-            compare(&file, &link, Sensitivity::Sensitive),
-            Ordering::Greater
-        );
-
-        // Within the directory group the natural-name rule still applies, so a
-        // symlink-to-dir and a real dir interleave alphabetically.
-        let real = entry("m_dir", EntryKind::Directory);
-        assert_eq!(
-            compare(&link, &real, Sensitivity::Sensitive),
-            Ordering::Greater
-        );
-        assert_eq!(
-            compare(&real, &link, Sensitivity::Sensitive),
-            Ordering::Less
-        );
-    }
-
-    #[test]
     fn symlink_to_file_sorts_with_files() {
         let link = entry("a_link", EntryKind::Symlink);
         let real = entry("z_dir", EntryKind::Directory);
@@ -302,22 +268,6 @@ mod tests {
         assert_eq!(
             compare(&dir, &broken, Sensitivity::Sensitive),
             Ordering::Less
-        );
-    }
-
-    #[test]
-    fn sort_groups_symlink_to_dir_with_directories() {
-        let mut v = vec![
-            entry("file2", EntryKind::RegularFile),
-            entry("dir10", EntryKind::Directory),
-            symlink_to_dir("dir5_link"),
-            entry("file10", EntryKind::RegularFile),
-            entry("dir2", EntryKind::Directory),
-        ];
-        sort(&mut v, Sensitivity::Sensitive);
-        assert_eq!(
-            names(&v),
-            vec!["dir2", "dir5_link", "dir10", "file2", "file10"]
         );
     }
 

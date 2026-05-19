@@ -20,11 +20,15 @@ A modern replacement for `ls`.
 
 ## Behavior
 
-`freshl` supports the greatest hits of `ls` options: `-R`, `-S`, `-t`, `-r`,
-`-d`, and `-L`.
+`freshl` supports the greatest hits of `ls` options: `-R`, `-S`, `-t`, `-r`, and
+`-d`.
 
 `-R` ignores gitignored and dotfile dirs, unless with `-u` or `-uu` (à la
 `ripgrep`).
+
+Symlinks are always followed: a row reads `name → target` (or
+`name → mid → target` for multi-hop), with the final target in its natural
+per-kind color. Broken symlinks keep the arrow form with the target in red.
 
 ## Display
 
@@ -34,7 +38,8 @@ from that, there are _no display options_. You get it my way.
 - Integrated Git status.
 - File modes are in octal, e.g., `644` instead of `rw-r--r--`.
 - Timestamps are always UTC.
-- Directories sort first, along with symlinks to directories.
+- Directories sort first. Since symlinks-to-directories are followed, they sort
+  with their targets.
 - On case-insensitive filesystems, such as APFS, sorting is case-insensitive.
 
 There is also context-sensitive dimming to deemphasize less-useful information:

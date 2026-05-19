@@ -209,9 +209,9 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
-            symlink_target_is_dir: false,
             dev: 0,
             ino: 0,
+            follow_chain: Vec::new(),
         }
     }
 

@@ -56,15 +56,20 @@ pub struct Entry {
     pub size: u64,
     pub rdev: u64,
     pub mtime: SystemTime,
+    // Populated only on the broken-symlink fallback path, where `stat` failed
+    // and we kept the lstat representation so the row still appears. Healthy
+    // symlinks express their target through `follow_chain` instead.
     pub symlink_target: Option<PathBuf>,
-    // True only when `kind == Symlink` and the target stats as a directory.
-    // Read by the sort comparator so symlinks-to-dirs group with real dirs.
-    pub symlink_target_is_dir: bool,
-    // Filesystem identity of the *recorded* metadata (target under -L, link
-    // otherwise). Read by `list_recursive`'s cycle check under -LR so a
-    // symlink that resolves back into its own ancestor chain is skipped.
+    // Filesystem identity of the *recorded* metadata (target for resolved
+    // symlinks, link for broken ones). Read by `list_recursive`'s cycle check
+    // so a symlink that resolves back into its own ancestor chain is skipped.
     pub dev: u64,
     pub ino: u64,
+    // Readlink targets traversed while resolving this row. `[0]` is
+    // `readlink(name)`; `last()` is the final non-symlink the chain
+    // terminates in. Empty for non-symlinks and for broken-symlink fallbacks
+    // (the chain isn't built when `stat` failed).
+    pub follow_chain: Vec<PathBuf>,
 }
 
 #[cfg(test)]

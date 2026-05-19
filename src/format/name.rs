@@ -24,8 +24,12 @@ use crate::format::palette::Palette;
 ///
 /// ANSI escape sequences are interleaved with the filename's underlying bytes
 /// verbatim, so non-UTF-8 names round-trip exactly to a pipe while still
-/// rendering with the right colour on a terminal. For symlinks, the output
-/// includes a dimmed arrow and the link target.
+/// rendering with the right colour on a terminal. Symlinks render as
+/// `name → target`, walking the full chain on multi-hop links. The
+/// link/intermediate names render in the `ln` symlink color, the arrows
+/// dim, and the final target in its natural per-kind color. Broken symlinks
+/// fall back to the same arrow form, with the missing target in `mi` (or
+/// red).
 #[must_use]
 pub fn format_name(
     palette: &Palette,
@@ -36,28 +40,54 @@ pub fn format_name(
     let base = palette.style_for(entry, target_missing);
     let dim = Style::new().effects(Effects::DIMMED);
     let red = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
-
-    let mut out = Vec::with_capacity(entry.name.len() + 32);
-    let name_style = if dim_if_ignored {
-        // OR DIMMED onto whatever the palette already set (bold, fg, …) so the
-        // dim cue doesn't overwrite the type/extension styling.
-        base.effects(base.get_effects() | Effects::DIMMED)
-    } else {
-        base
+    let overlay = |s: Style| {
+        if dim_if_ignored {
+            // OR DIMMED onto whatever the palette already set (bold, fg, …)
+            // so the dim cue doesn't overwrite the type/extension styling.
+            s.effects(s.get_effects() | Effects::DIMMED)
+        } else {
+            s
+        }
     };
+    let name_style = overlay(base);
+
+    let chain_bytes: usize = entry
+        .follow_chain
+        .iter()
+        .map(|p| p.as_os_str().len() + 16)
+        .sum();
+    let mut out = Vec::with_capacity(entry.name.len() + 32 + chain_bytes);
+
+    if let Some((final_target, hops)) = entry.follow_chain.split_last() {
+        // entry.kind reflects the resolved target's kind, so `name_style`
+        // is already the target's per-kind style. Ask the palette
+        // separately for the `ln` style so the left side of the chain
+        // (link name + intermediates) renders as symlinks.
+        let chain_style = overlay(palette.style_for_symlink());
+        let segment = |out: &mut Vec<u8>, style: Style, bytes: &[u8]| {
+            let _ = write!(out, "{style}");
+            out.extend_from_slice(bytes);
+            let _ = write!(out, "{}", style.render_reset());
+        };
+        segment(&mut out, chain_style, entry.name.as_bytes());
+        for intermediate in hops {
+            segment(&mut out, dim, " → ".as_bytes());
+            segment(&mut out, chain_style, intermediate.as_os_str().as_bytes());
+        }
+        segment(&mut out, dim, " → ".as_bytes());
+        segment(&mut out, name_style, final_target.as_os_str().as_bytes());
+        return out;
+    }
+
     let _ = write!(out, "{name_style}");
     out.extend_from_slice(entry.name.as_bytes());
     let _ = write!(out, "{}", name_style.render_reset());
 
     if let Some(target) = &entry.symlink_target {
+        // Broken-symlink fallback: stat(2) failed in collect, so the row
+        // kept the lstat representation; missing target takes `mi`.
         let _ = write!(out, " {dim}→{} ", dim.render_reset());
-        let style = if target_missing {
-            // Honor the user's `mi` indicator when they've set it; fall back
-            // to red so a broken link is still visually obvious.
-            palette.style_for_missing_target().unwrap_or(red)
-        } else {
-            dim
-        };
+        let style = palette.style_for_missing_target().unwrap_or(red);
         let _ = write!(out, "{style}");
         out.extend_from_slice(target.as_os_str().as_bytes());
         let _ = write!(out, "{}", style.render_reset());
@@ -88,9 +118,9 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
-            symlink_target_is_dir: false,
             dev: 0,
             ino: 0,
+            follow_chain: Vec::new(),
         }
     }
 
@@ -107,26 +137,13 @@ mod tests {
     }
 
     #[test]
-    fn formats_symlink_with_arrow_and_target() {
-        let palette = Palette::empty();
-        let mut e = entry("link", EntryKind::Symlink);
-        e.symlink_target = Some(PathBuf::from("/usr/bin"));
-        let bytes = format_name(&palette, &e, false, false);
-        let s = as_lossy(&bytes);
-        assert!(s.contains("link"));
-        assert!(s.contains('→'));
-        assert!(s.contains("/usr/bin"));
-    }
-
-    #[test]
-    fn missing_target_uses_red_when_mi_unset() {
+    fn broken_symlink_renders_arrow_with_red_target_when_mi_unset() {
         let palette = Palette::empty();
         let mut e = entry("link", EntryKind::Symlink);
         e.symlink_target = Some(PathBuf::from("nowhere"));
-        let plain = format_name(&palette, &e, false, false);
-        let red_styled = format_name(&palette, &e, false, true);
-        assert_ne!(plain, red_styled);
-        let s = as_lossy(&red_styled);
+        let s = as_lossy(&format_name(&palette, &e, false, true));
+        assert!(s.contains("link"));
+        assert!(s.contains('→'));
         assert!(s.contains("nowhere"));
         // SGR 31 is anstyle's red; without `mi` configured the target falls
         // back to freshl's hardcoded red.
@@ -134,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_target_uses_mi_when_palette_sets_it() {
+    fn broken_symlink_target_uses_mi_when_palette_sets_it() {
         let palette = Palette::from_string("mi=01;33");
         let mut e = entry("link", EntryKind::Symlink);
         e.symlink_target = Some(PathBuf::from("nowhere"));
@@ -167,6 +184,49 @@ mod tests {
     }
 
     #[test]
+    fn formats_follow_chain_with_arrows_forward_to_target() {
+        let palette = Palette::empty();
+        let mut e = entry("CLAUDE.md", EntryKind::RegularFile);
+        e.follow_chain = vec![PathBuf::from("AGENTS.md")];
+        let s = as_lossy(&format_name(&palette, &e, false, false));
+        // Each segment carries its own style with explicit resets, so the
+        // arrow and target are sandwiched between ANSI control sequences
+        // rather than being a contiguous substring. Spot-check order.
+        let name_pos = s.find("CLAUDE.md").expect("name missing");
+        let target_pos = s.find("AGENTS.md").expect("target missing");
+        assert!(name_pos < target_pos, "name must precede target: {s}");
+        assert!(s.contains('→'), "forward arrow missing: {s}");
+        assert!(!s.contains("<-"), "no reverse arrow: {s}");
+    }
+
+    #[test]
+    fn formats_multi_hop_follow_chain_in_forward_order() {
+        let palette = Palette::empty();
+        let mut e = entry("top", EntryKind::RegularFile);
+        e.follow_chain = vec![PathBuf::from("mid"), PathBuf::from("target")];
+        let s = as_lossy(&format_name(&palette, &e, false, false));
+        let prefix_pos = s.find("top").expect("name missing");
+        let mid_pos = s.find("mid").expect("intermediate missing");
+        let target_pos = s.find("target").expect("target missing");
+        assert!(
+            prefix_pos < mid_pos && mid_pos < target_pos,
+            "expected forward order name → mid → target: {s}"
+        );
+    }
+
+    #[test]
+    fn follow_chain_left_side_uses_symlink_color() {
+        // `ln=01;36` is the `LS_COLORS` default for symlinks: bold cyan.
+        // The link name and any intermediates should render with that SGR
+        // 36, not with the dim-only fallback.
+        let palette = Palette::from_string("ln=01;36");
+        let mut e = entry("CLAUDE.md", EntryKind::RegularFile);
+        e.follow_chain = vec![PathBuf::from("AGENTS.md")];
+        let s = as_lossy(&format_name(&palette, &e, false, false));
+        assert!(s.contains("36"), "symlink cyan SGR missing: {s}");
+    }
+
+    #[test]
     fn non_utf8_name_round_trips_exactly() {
         use std::os::unix::ffi::OsStringExt;
         let palette = Palette::empty();
@@ -183,9 +243,9 @@ mod tests {
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
-            symlink_target_is_dir: false,
             dev: 0,
             ino: 0,
+            follow_chain: Vec::new(),
         };
         let bytes = format_name(&palette, &e, false, false);
         // The raw byte 0xFF must appear in the output verbatim, not as U+FFFD.

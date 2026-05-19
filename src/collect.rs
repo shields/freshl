@@ -40,8 +40,8 @@ pub struct DirListing {
 /// Read `path` as a directory and return one [`Entry`] per child that could
 /// be stat'd, along with per-child errors for those that could not.
 ///
-/// With `follow_symlinks`, each child's metadata is taken from its target
-/// (via `stat`) instead of the link itself (`lstat`); see [`entry_for_path`].
+/// Each child's metadata is taken from its target (via `stat`) instead of
+/// the link itself (`lstat`); see [`entry_for_path`].
 ///
 /// # Errors
 ///
@@ -49,9 +49,9 @@ pub struct DirListing {
 /// directory or iterated. Per-child stat failures are accumulated in
 /// `DirListing::errors` rather than aborting the listing, so an unreadable
 /// individual file doesn't hide the rest of the directory's contents.
-pub fn collect_directory(path: &Path, follow_symlinks: bool) -> io::Result<DirListing> {
+pub fn collect_directory(path: &Path) -> io::Result<DirListing> {
     let mut iter = fs::read_dir(path)?.map(|r| r.map(|de| de.path()));
-    Ok(process_paths(&mut iter, path, follow_symlinks))
+    Ok(process_paths(&mut iter, path))
 }
 
 // Takes a `&mut dyn Iterator` so the function compiles to a single
@@ -59,15 +59,11 @@ pub fn collect_directory(path: &Path, follow_symlinks: bool) -> io::Result<DirLi
 // dead in each instantiation, which trips per-instantiation line coverage even
 // when both arms are exercised across tests. A trait-object reference avoids
 // the heap allocation a `Box<dyn …>` would impose on every directory read.
-fn process_paths(
-    iter: &mut dyn Iterator<Item = io::Result<PathBuf>>,
-    parent: &Path,
-    follow_symlinks: bool,
-) -> DirListing {
+fn process_paths(iter: &mut dyn Iterator<Item = io::Result<PathBuf>>, parent: &Path) -> DirListing {
     let mut listing = DirListing::default();
     for r in iter {
         match r {
-            Ok(child) => match entry_for_path(&child, follow_symlinks) {
+            Ok(child) => match entry_for_path(&child) {
                 Ok(e) => listing.entries.push(e),
                 Err(source) => listing.errors.push((child, source)),
             },
@@ -79,33 +75,32 @@ fn process_paths(
 
 /// Build an [`Entry`] for a single path.
 ///
-/// By default uses `lstat` semantics: a symlink is reported as a symlink with
-/// the link's own metadata and the target name attached. With
-/// `follow_symlinks`, a symlink whose target can be `stat(2)`'d is reported
-/// as the *target*: target mode/owner/size and the target's kind. Broken
-/// symlinks under `follow_symlinks` fall back to the lstat representation so
-/// the row still appears in the listing (matching `find -L` semantics).
+/// Symlinks are followed: a symlink whose target can be `stat(2)`'d is
+/// reported as the *target* (target mode/owner/size/kind), with the readlink
+/// chain recorded in `follow_chain` for display. Broken symlinks fall back
+/// to the lstat representation so the row still appears in the listing
+/// (matching `find -L` semantics).
 ///
 /// # Errors
 ///
 /// Returns the underlying I/O error if `path` does not exist or its metadata
 /// cannot be read.
-pub fn entry_for_path(path: &Path, follow_symlinks: bool) -> io::Result<Entry> {
+pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
     let lmeta = fs::symlink_metadata(path)?;
     let lkind = classify(lmeta.mode());
 
     if lkind != EntryKind::Symlink {
-        return Ok(make_entry(path, &lmeta, lkind, None, false));
+        return Ok(make_entry(path, &lmeta, lkind, None));
     }
 
     // `fs::metadata` is `stat(2)`; symlink cycles surface as ELOOP and the
-    // `Err` is treated as "target unreachable", so the kernel's MAXSYMLINKS
-    // bounds the work.
-    let target_meta = fs::metadata(path).ok();
-
-    if follow_symlinks && let Some(tmeta) = &target_meta {
+    // `Err` drops us onto the lstat fallback below, so the kernel's
+    // MAXSYMLINKS bounds the work.
+    if let Ok(tmeta) = fs::metadata(path) {
         let tkind = classify(tmeta.mode());
-        return Ok(make_entry(path, tmeta, tkind, None, false));
+        let mut entry = make_entry(path, &tmeta, tkind, None);
+        entry.follow_chain = build_follow_chain(path);
+        return Ok(entry);
     }
 
     // If `read_link` fails on a path lstat'd as a symlink (rare — usually a
@@ -113,14 +108,32 @@ pub fn entry_for_path(path: &Path, follow_symlinks: bool) -> io::Result<Entry> {
     // sees the symlink name in the listing; we just leave `symlink_target`
     // empty rather than dropping the entry entirely.
     let symlink_target = fs::read_link(path).ok();
-    let target_is_dir = target_meta.is_some_and(|m| m.is_dir());
-    Ok(make_entry(
-        path,
-        &lmeta,
-        lkind,
-        symlink_target,
-        target_is_dir,
-    ))
+    Ok(make_entry(path, &lmeta, lkind, symlink_target))
+}
+
+// Walk the readlink chain from `start`, recording each hop's target text.
+// `MAX_HOPS` is the generous Linux ceiling (macOS uses 32) — any chain the
+// kernel didn't reject with ELOOP fits within it.
+fn build_follow_chain(start: &Path) -> Vec<PathBuf> {
+    const MAX_HOPS: usize = 40;
+    let mut chain = Vec::new();
+    let mut current = start.to_path_buf();
+    for _ in 0..MAX_HOPS {
+        let Ok(target) = fs::read_link(&current) else {
+            break;
+        };
+        let next = if target.is_absolute() {
+            target.clone()
+        } else {
+            current.parent().unwrap_or(&current).join(&target)
+        };
+        chain.push(target);
+        match fs::symlink_metadata(&next) {
+            Ok(m) if m.file_type().is_symlink() => current = next,
+            _ => break,
+        }
+    }
+    chain
 }
 
 fn make_entry(
@@ -128,7 +141,6 @@ fn make_entry(
     meta: &fs::Metadata,
     kind: EntryKind,
     symlink_target: Option<PathBuf>,
-    symlink_target_is_dir: bool,
 ) -> Entry {
     let name = path.file_name().map_or_else(
         || path.as_os_str().to_os_string(),
@@ -146,9 +158,9 @@ fn make_entry(
         rdev: meta.rdev(),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         symlink_target,
-        symlink_target_is_dir,
         dev: meta.dev(),
         ino: meta.ino(),
+        follow_chain: Vec::new(),
     }
 }
 
@@ -169,12 +181,13 @@ pub const fn classify(mode: u32) -> EntryKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK, classify,
-        collect_directory, entry_for_path, process_paths,
+        S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFLNK, S_IFREG, S_IFSOCK, build_follow_chain,
+        classify, collect_directory, entry_for_path, process_paths,
     };
     use crate::entry::EntryKind;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -196,7 +209,7 @@ mod tests {
         fs::write(dir.path().join(".hidden"), b"hi").unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
 
-        let mut listing = collect_directory(dir.path(), false).unwrap();
+        let mut listing = collect_directory(dir.path()).unwrap();
         listing.entries.sort_by(|x, y| x.name.cmp(&y.name));
         let names: Vec<_> = listing
             .entries
@@ -226,7 +239,7 @@ mod tests {
         p.set_mode(0o400);
         fs::set_permissions(&inner, p).unwrap();
 
-        let listing = collect_directory(&inner, false);
+        let listing = collect_directory(&inner);
 
         let mut p = fs::metadata(&inner).unwrap().permissions();
         p.set_mode(0o755);
@@ -239,123 +252,141 @@ mod tests {
     }
 
     #[test]
-    fn entry_for_path_does_not_follow_symlink() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("target");
-        fs::write(&target, b"hi").unwrap();
-        let link = dir.path().join("link");
-        symlink(&target, &link).unwrap();
-
-        let entry = entry_for_path(&link, false).unwrap();
-        assert_eq!(entry.kind, EntryKind::Symlink);
-        assert_eq!(entry.symlink_target.as_deref(), Some(target.as_path()));
-        assert!(!entry.symlink_target_is_dir);
-    }
-
-    #[test]
-    fn entry_for_path_symlink_to_directory_sets_target_is_dir() {
-        let dir = tempdir().unwrap();
-        let target = dir.path().join("target_dir");
-        fs::create_dir(&target).unwrap();
-        let link = dir.path().join("link_to_dir");
-        symlink(&target, &link).unwrap();
-
-        let entry = entry_for_path(&link, false).unwrap();
-        assert_eq!(entry.kind, EntryKind::Symlink);
-        assert!(entry.symlink_target_is_dir);
-    }
-
-    #[test]
     fn entry_for_path_broken_symlink_still_classifies() {
         let dir = tempdir().unwrap();
         let link = dir.path().join("dangling");
         symlink(dir.path().join("nope"), &link).unwrap();
-        let entry = entry_for_path(&link, false).unwrap();
+        let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
         assert!(entry.symlink_target.is_some());
-        assert!(!entry.symlink_target_is_dir);
     }
 
     #[test]
-    fn entry_for_path_symlink_cycle_does_not_loop_and_is_not_dir() {
-        // Pins the loop-safety contract: ELOOP from stat(2) maps to false,
-        // so a hand-rolled symlink walk could not silently replace it.
+    fn entry_for_path_symlink_cycle_falls_back_without_looping() {
+        // Pins the loop-safety contract: ELOOP from stat(2) drops us onto the
+        // lstat fallback, so a hand-rolled symlink walk could not silently
+        // replace it.
         let dir = tempdir().unwrap();
         let a = dir.path().join("loop_a");
         let b = dir.path().join("loop_b");
         symlink(&b, &a).unwrap();
         symlink(&a, &b).unwrap();
-        let entry = entry_for_path(&a, false).unwrap();
+        let entry = entry_for_path(&a).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
-        assert!(!entry.symlink_target_is_dir);
+        assert!(entry.follow_chain.is_empty());
     }
 
     #[test]
-    fn entry_for_path_follow_reports_target_metadata_for_file() {
+    fn entry_for_path_reports_target_metadata_for_file() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("target");
         fs::write(&target, b"contents").unwrap();
         let link = dir.path().join("link");
         symlink(&target, &link).unwrap();
 
-        let entry = entry_for_path(&link, true).unwrap();
+        let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::RegularFile);
         assert!(entry.symlink_target.is_none());
-        assert!(!entry.symlink_target_is_dir);
         assert_eq!(entry.size, b"contents".len() as u64);
     }
 
     #[test]
-    fn entry_for_path_follow_reports_target_kind_for_directory() {
+    fn entry_for_path_reports_target_kind_for_directory() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("target_dir");
         fs::create_dir(&target).unwrap();
         let link = dir.path().join("link_to_dir");
         symlink(&target, &link).unwrap();
 
-        let entry = entry_for_path(&link, true).unwrap();
+        let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Directory);
         assert!(entry.symlink_target.is_none());
     }
 
     #[test]
-    fn entry_for_path_follow_falls_back_on_broken_symlink() {
+    fn entry_for_path_falls_back_on_broken_symlink() {
         let dir = tempdir().unwrap();
         let link = dir.path().join("dangling");
         symlink(dir.path().join("nope"), &link).unwrap();
-        let entry = entry_for_path(&link, true).unwrap();
+        let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
         assert!(entry.symlink_target.is_some());
-        assert!(!entry.symlink_target_is_dir);
     }
 
     #[test]
-    fn entry_for_path_follow_is_noop_for_regular_file() {
+    fn entry_for_path_follow_chain_records_single_hop() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"x").unwrap();
+        let link = dir.path().join("link");
+        symlink(&target, &link).unwrap();
+
+        let entry = entry_for_path(&link).unwrap();
+        assert_eq!(entry.follow_chain, vec![target]);
+    }
+
+    #[test]
+    fn entry_for_path_follow_chain_records_each_hop() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"x").unwrap();
+        // Use relative targets so the chain text matches what readlink returns
+        // verbatim, rather than smuggling absolute paths via the test harness.
+        symlink("target", dir.path().join("mid")).unwrap();
+        symlink("mid", dir.path().join("top")).unwrap();
+
+        let entry = entry_for_path(&dir.path().join("top")).unwrap();
+        assert_eq!(
+            entry.follow_chain,
+            vec![PathBuf::from("mid"), PathBuf::from("target"),]
+        );
+    }
+
+    #[test]
+    fn entry_for_path_follow_chain_empty_on_broken_link() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        symlink(dir.path().join("nope"), &link).unwrap();
+        let entry = entry_for_path(&link).unwrap();
+        assert!(entry.follow_chain.is_empty());
+    }
+
+    #[test]
+    fn entry_for_path_follow_chain_empty_for_regular_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("plain");
         fs::write(&file, b"x").unwrap();
-        let with = entry_for_path(&file, true).unwrap();
-        let without = entry_for_path(&file, false).unwrap();
-        assert_eq!(with.kind, without.kind);
-        assert_eq!(with.size, without.size);
+        let entry = entry_for_path(&file).unwrap();
+        assert_eq!(entry.kind, EntryKind::RegularFile);
+        assert!(entry.follow_chain.is_empty());
+    }
+
+    #[test]
+    fn build_follow_chain_breaks_when_start_is_not_a_symlink() {
+        // `read_link` on a non-symlink errors; exercises the defensive
+        // break that production paths don't hit outside a TOCTOU race.
+        let dir = tempdir().unwrap();
+        let regular = dir.path().join("plain");
+        fs::write(&regular, b"").unwrap();
+        assert!(build_follow_chain(&regular).is_empty());
     }
 
     #[test]
     fn collect_errors_on_missing_path() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nope");
-        assert!(collect_directory(&missing, false).is_err());
+        assert!(collect_directory(&missing).is_err());
     }
 
     #[test]
     fn entry_for_path_errors_on_missing() {
         let dir = tempdir().unwrap();
-        assert!(entry_for_path(&dir.path().join("nope"), false).is_err());
+        assert!(entry_for_path(&dir.path().join("nope")).is_err());
     }
 
     #[test]
     fn root_path_has_a_name() {
-        let entry = entry_for_path(std::path::Path::new("/"), false).unwrap();
+        let entry = entry_for_path(std::path::Path::new("/")).unwrap();
         assert!(!entry.name.is_empty());
     }
 
@@ -366,7 +397,7 @@ mod tests {
         let synthetic: Vec<io::Result<std::path::PathBuf>> =
             vec![Err(io::Error::other("synthetic"))];
         let mut iter = synthetic.into_iter();
-        let listing = process_paths(&mut iter, Path::new("/synthetic-parent"), false);
+        let listing = process_paths(&mut iter, Path::new("/synthetic-parent"));
         assert!(listing.entries.is_empty());
         assert_eq!(listing.errors.len(), 1);
         assert_eq!(listing.errors[0].0, Path::new("/synthetic-parent"));

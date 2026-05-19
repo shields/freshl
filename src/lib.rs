@@ -19,9 +19,14 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
+
+/// `(dev, ino)` — uniquely identifies a filesystem object across mounts.
+/// Used by `list_recursive` under `-LR` to break self-referential cycles.
+type Inode = (u64, u64);
 
 pub mod args;
 pub mod case;
@@ -139,7 +144,7 @@ fn list(
     let mut files: Vec<Entry> = Vec::new();
     let mut dirs: Vec<Entry> = Vec::new();
     for target in targets {
-        match collect::entry_for_path(target) {
+        match collect::entry_for_path(target, options.follow_symlinks) {
             Ok(mut entry) => {
                 // Display the user-supplied path so a `freshl /etc/passwd`
                 // row reads `… /etc/passwd`, not just `passwd`, and so the
@@ -222,10 +227,13 @@ fn list_directory(
     options: ListOptions,
     caches: &mut Caches,
 ) -> Result<bool, Error> {
-    let listing = collect::collect_directory(target).map_err(|source| Error::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
+    let listing =
+        collect::collect_directory(target, options.follow_symlinks).map_err(|source| {
+            Error::Io {
+                path: target.to_path_buf(),
+                source,
+            }
+        })?;
     if show_label {
         write_path_with_suffix(stdout, target, b":\n")?;
     }
@@ -266,6 +274,13 @@ fn report_listing_errors(stderr: &mut dyn Write, errors: &[(PathBuf, io::Error)]
 /// block. Subdirectory descent is gated on the unrestricted level: hidden
 /// (dot-prefix) and gitignored directories are skipped by default and
 /// progressively un-skipped at `-u` (gitignored) and `-uu` (hidden too).
+///
+/// With `-L` (`follow_symlinks`), symlinks-to-directories are reclassified as
+/// `Directory` by `entry_for_path` and descended into like real dirs. A
+/// per-path ancestor-inode set keeps a symlink that resolves back into its
+/// own ancestor chain from forming an infinite loop; non-ancestor revisits
+/// (two siblings linking to the same target) are still listed, matching
+/// `ls -LR`.
 fn list_recursive(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
@@ -273,12 +288,22 @@ fn list_recursive(
     options: ListOptions,
     caches: &mut Caches,
 ) -> Result<bool, Error> {
-    let mut stack: VecDeque<PathBuf> = VecDeque::new();
-    stack.push_back(root.to_path_buf());
+    let mut stack: VecDeque<(PathBuf, Vec<Inode>)> = VecDeque::new();
+    let root_ancestors = if options.follow_symlinks {
+        // Best-effort: a stat failure here would also fail `collect_directory`
+        // below, where the error is already reported with full context.
+        std::fs::metadata(root)
+            .ok()
+            .map(|m| vec![(m.dev(), m.ino())])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    stack.push_back((root.to_path_buf(), root_ancestors));
     let mut had_error = false;
     let mut first = true;
-    while let Some(target) = stack.pop_front() {
-        let listing = match collect::collect_directory(&target) {
+    while let Some((target, ancestors)) = stack.pop_front() {
+        let listing = match collect::collect_directory(&target, options.follow_symlinks) {
             Ok(listing) => listing,
             Err(source) => {
                 // If the root itself fails, surface the error to the caller
@@ -319,10 +344,18 @@ fn list_recursive(
         let snapshot = caches.snapshots.for_target(&target);
         // Decide descent BEFORE rendering so we don't have to revisit the
         // snapshot lookup later (it can canonicalize, so each call has cost).
-        let mut to_push: Vec<PathBuf> = Vec::new();
+        let mut to_push: Vec<(PathBuf, Vec<Inode>)> = Vec::new();
         for entry in &entries {
             if entry.kind == EntryKind::Directory && should_descend(entry, snapshot, options) {
-                to_push.push(entry.path.clone());
+                let mut child_ancestors = ancestors.clone();
+                if options.follow_symlinks {
+                    let key = (entry.dev, entry.ino);
+                    if ancestors.contains(&key) {
+                        continue;
+                    }
+                    child_ancestors.push(key);
+                }
+                to_push.push((entry.path.clone(), child_ancestors));
             }
         }
         render_entries(
@@ -726,6 +759,8 @@ mod tests {
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: Some(PathBuf::from("/definitely/does/not/exist/anywhere")),
             symlink_target_is_dir: false,
+            dev: 0,
+            ino: 0,
         };
         assert!(target_is_missing(&e));
     }
@@ -750,6 +785,8 @@ mod tests {
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
             symlink_target_is_dir: false,
+            dev: 0,
+            ino: 0,
         };
         assert!(!target_is_missing(&e));
     }
@@ -776,6 +813,8 @@ mod tests {
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: Some(PathBuf::from("does-not-exist-anywhere")),
             symlink_target_is_dir: false,
+            dev: 0,
+            ino: 0,
         };
         assert!(target_is_missing(&e));
     }
@@ -1265,6 +1304,108 @@ mod tests {
         assert!(
             text.contains('A'),
             "expected git column for staged add: {text}"
+        );
+    }
+
+    #[test]
+    fn follow_symlinks_renders_target_kind_for_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"contents").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(os(&["-L", link.to_str().unwrap()]), &mut out, &mut err);
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(link.to_str().unwrap()));
+        assert!(!text.contains('→'), "no arrow expected under -L: {text}");
+    }
+
+    #[test]
+    fn follow_symlinks_expands_symlink_to_directory_arg() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("real");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside"), b"x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(os(&["-L", link.to_str().unwrap()]), &mut out, &mut err);
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("inside"), "expanded contents: {text}");
+    }
+
+    #[test]
+    fn follow_symlinks_falls_back_on_broken_symlink() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nope"), &link).unwrap();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-L", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("dangling"));
+        assert!(text.contains('→'), "broken link still shows arrow: {text}");
+    }
+
+    #[test]
+    fn follow_symlinks_with_recursive_descends_into_linked_directory() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("inside"), b"x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-LR", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        let link_label = format!("{}:", link.display());
+        assert!(
+            text.contains(&link_label),
+            "symlink dir should be descended into: {text}"
+        );
+    }
+
+    #[test]
+    fn follow_symlinks_with_recursive_breaks_self_referential_cycle() {
+        let dir = tempdir().unwrap();
+        let inner = dir.path().join("inner");
+        fs::create_dir(&inner).unwrap();
+        let cycle = inner.join("loop");
+        std::os::unix::fs::symlink(&inner, &cycle).unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-LR", dir.path().to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        let text = String::from_utf8(out).unwrap();
+        // The cycle link is listed once (under inner:) but its own block
+        // (which would re-render inner's contents) must not appear.
+        let loop_label = format!("{}:", cycle.display());
+        assert!(
+            !text.contains(&loop_label),
+            "self-loop must not produce its own block: {text}"
         );
     }
 

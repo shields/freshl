@@ -17,6 +17,9 @@ use std::path::PathBuf;
 
 use crate::sort::SortKey;
 
+// Each bool toggles an independent CLI flag, so collapsing them into an enum
+// would obscure the parser more than it would clarify the type.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListOptions {
     pub recursive: bool,
@@ -32,6 +35,9 @@ pub struct ListOptions {
     /// directories. Suppresses `-R` for the same reason GNU `ls` does
     /// (the descent is the thing `-d` opts out of).
     pub directory: bool,
+    /// `-L`: dereference symlinks; reclassify as the target's kind so
+    /// symlinks-to-dirs expand under `-R`.
+    pub follow_symlinks: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +70,7 @@ Options:
   -u         Recurse into gitignored directories (with -R). Repeat (-uu) to
              also recurse into hidden directories.
   -d         List directories themselves, not their contents. Suppresses -R.
+  -L         Dereference symlinks: show the target's metadata, not the link's.
   -h, --help     Print this help.
       --version  Print version.
       --        Treat following arguments as paths.
@@ -115,6 +122,7 @@ where
                     b'r' => options.reverse = true,
                     b'u' => options.unrestricted = options.unrestricted.saturating_add(1).min(2),
                     b'd' => options.directory = true,
+                    b'L' => options.follow_symlinks = true,
                     _ => {
                         return Err(ArgError {
                             message: format!("unknown option: {}", arg.to_string_lossy()),
@@ -374,6 +382,29 @@ mod tests {
             parse(args(&["-dR"])),
             Ok(list_with(ListOptions {
                 directory: true,
+                recursive: true,
+                ..ListOptions::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn follow_short_flag_sets_follow_symlinks() {
+        assert_eq!(
+            parse(args(&["-L"])),
+            Ok(list_with(ListOptions {
+                follow_symlinks: true,
+                ..ListOptions::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn follow_bundles_with_recursive() {
+        assert_eq!(
+            parse(args(&["-LR"])),
+            Ok(list_with(ListOptions {
+                follow_symlinks: true,
                 recursive: true,
                 ..ListOptions::default()
             }))

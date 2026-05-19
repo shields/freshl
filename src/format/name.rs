@@ -89,6 +89,8 @@ mod tests {
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
             symlink_target_is_dir: false,
+            dev: 0,
+            ino: 0,
         }
     }
 
@@ -182,6 +184,8 @@ mod tests {
             mtime: SystemTime::UNIX_EPOCH,
             symlink_target: None,
             symlink_target_is_dir: false,
+            dev: 0,
+            ino: 0,
         };
         let bytes = format_name(&palette, &e, false, false);
         // The raw byte 0xFF must appear in the output verbatim, not as U+FFFD.

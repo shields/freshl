@@ -60,6 +60,11 @@ pub struct Entry {
     // True only when `kind == Symlink` and the target stats as a directory.
     // Read by the sort comparator so symlinks-to-dirs group with real dirs.
     pub symlink_target_is_dir: bool,
+    // Filesystem identity of the *recorded* metadata (target under -L, link
+    // otherwise). Read by `list_recursive`'s cycle check under -LR so a
+    // symlink that resolves back into its own ancestor chain is skipped.
+    pub dev: u64,
+    pub ino: u64,
 }
 
 #[cfg(test)]

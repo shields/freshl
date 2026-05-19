@@ -20,8 +20,8 @@ A modern replacement for `ls`.
 
 ## Behavior
 
-`freshl` supports the greatest hits of `ls` options: `-R`, `-S`, `-t`, `-r`, and
-`-d`.
+`freshl` supports the greatest hits of `ls` options: `-R`, `-S`, `-t`, `-r`,
+`-d`, and `-L`.
 
 `-R` ignores gitignored and dotfile dirs, unless with `-u` or `-uu` (à la
 `ripgrep`).

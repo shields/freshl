@@ -432,9 +432,8 @@ fn render_files(
 }
 
 fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<&Snapshot>) {
-    // `Snapshot::lookup` can canonicalize the path; do it once and derive
-    // both the git column and the ignored flag from the same result.
-    let code = snapshot.map(|s| s.lookup(&entry.path));
+    let code = snapshot
+        .map(|s| s.display_code_for(&entry.path, entry.kind == EntryKind::Directory));
     if let Some(c) = code {
         row.git = Some(format::git_col::render(c));
     }

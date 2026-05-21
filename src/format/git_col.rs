@@ -54,6 +54,7 @@ mod tests {
             PorcelainCode::RENAMED,
             PorcelainCode::COPIED,
             PorcelainCode::UNMERGED,
+            PorcelainCode::DIRTY_SUBTREE,
         ] {
             let s = render(code);
             assert!(s.contains(code.index));
@@ -79,5 +80,14 @@ mod tests {
     fn modifications_are_yellow() {
         let s = render(PorcelainCode::MODIFIED_WORKTREE);
         assert!(s.contains("\x1b[33m"));
+    }
+
+    #[test]
+    fn dirty_subtree_is_yellow_asterisk() {
+        let s = render(PorcelainCode::DIRTY_SUBTREE);
+        assert!(s.contains('*'));
+        assert!(s.contains("\x1b[33m"));
+        // Must NOT be dimmed — that's reserved for CLEAN/IGNORED.
+        assert!(!s.contains("\x1b[2m"));
     }
 }

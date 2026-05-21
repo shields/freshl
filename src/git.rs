@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -74,6 +74,10 @@ impl PorcelainCode {
         index: 'U',
         worktree: 'U',
     };
+    pub const DIRTY_SUBTREE: Self = Self {
+        index: '*',
+        worktree: ' ',
+    };
 
     #[must_use]
     pub const fn with_index(self, idx: char) -> Self {
@@ -88,6 +92,7 @@ impl PorcelainCode {
 pub struct Snapshot {
     pub root: PathBuf,
     pub statuses: HashMap<PathBuf, PorcelainCode>,
+    dirty_ancestors: HashSet<PathBuf>,
 }
 
 impl Snapshot {
@@ -100,17 +105,15 @@ impl Snapshot {
     /// covers symlinked workdirs and `freshl ..` style paths.
     #[must_use]
     pub fn lookup(&self, path: &Path) -> PorcelainCode {
-        let rel = self.relativize(path);
-        let Some(rel) = rel else {
-            return PorcelainCode::CLEAN;
-        };
-        if let Some(code) = self.statuses.get(&rel).copied() {
+        self.relativize(path)
+            .map_or(PorcelainCode::CLEAN, |rel| self.lookup_rel(&rel))
+    }
+
+    fn lookup_rel(&self, rel: &Path) -> PorcelainCode {
+        if let Some(code) = self.statuses.get(rel).copied() {
             return code;
         }
-        for ancestor in rel.ancestors().skip(1) {
-            if ancestor.as_os_str().is_empty() {
-                break;
-            }
+        for ancestor in iter_ancestors(rel) {
             if let Some(code) = self.statuses.get(ancestor).copied()
                 && (code == PorcelainCode::UNTRACKED || code == PorcelainCode::IGNORED)
             {
@@ -123,6 +126,35 @@ impl Snapshot {
     #[must_use]
     pub fn is_ignored(&self, path: &Path) -> bool {
         self.lookup(path) == PorcelainCode::IGNORED
+    }
+
+    /// Ignored descendants don't count — otherwise vendored/build trees would
+    /// flag every ancestor.
+    #[must_use]
+    pub fn has_dirty_descendants(&self, path: &Path) -> bool {
+        let Some(rel) = self.relativize(path) else {
+            return false;
+        };
+        self.dirty_ancestors.contains(&rel)
+    }
+
+    /// Returns `DIRTY_SUBTREE` for a tracked-clean directory whose subtree
+    /// has dirty descendants; otherwise behaves like [`Self::lookup`].
+    /// Single path-normalisation for both checks.
+    #[must_use]
+    pub fn display_code_for(&self, path: &Path, is_directory: bool) -> PorcelainCode {
+        let Some(rel) = self.relativize(path) else {
+            return PorcelainCode::CLEAN;
+        };
+        let direct = self.lookup_rel(&rel);
+        if direct == PorcelainCode::CLEAN
+            && is_directory
+            && self.dirty_ancestors.contains(&rel)
+        {
+            PorcelainCode::DIRTY_SUBTREE
+        } else {
+            direct
+        }
     }
 
     fn relativize(&self, path: &Path) -> Option<PathBuf> {
@@ -194,9 +226,11 @@ fn build_snapshot(scope: &Path) -> Option<Snapshot> {
     let workdir = normalize_existing(repo.workdir()?)?;
     let pathspec = pathspec_for(scope, &workdir)?;
     let statuses = collect_statuses(&repo, pathspec).unwrap_or_default();
+    let dirty_ancestors = compute_dirty_ancestors(&statuses);
     Some(Snapshot {
         root: workdir,
         statuses,
+        dirty_ancestors,
     })
 }
 
@@ -240,10 +274,35 @@ pub fn discover(start: &Path) -> Option<Snapshot> {
     let repo = gix::discover(start).ok()?;
     let workdir = normalize_existing(repo.workdir()?)?;
     let statuses = collect_statuses(&repo, Vec::new()).unwrap_or_default();
+    let dirty_ancestors = compute_dirty_ancestors(&statuses);
     Some(Snapshot {
         root: workdir,
         statuses,
+        dirty_ancestors,
     })
+}
+
+fn compute_dirty_ancestors(
+    statuses: &HashMap<PathBuf, PorcelainCode>,
+) -> HashSet<PathBuf> {
+    let mut out = HashSet::new();
+    for (path, code) in statuses {
+        if *code == PorcelainCode::CLEAN || *code == PorcelainCode::IGNORED {
+            continue;
+        }
+        for ancestor in iter_ancestors(path) {
+            out.insert(ancestor.to_path_buf());
+        }
+    }
+    out
+}
+
+// Yields strict ancestors of `rel`, including the empty path (which represents
+// the repository root after `relativize`). The repository root itself must
+// appear in `dirty_ancestors` so `freshl -d <root>` flags a dirty tree; the
+// extra `statuses.get("")` in `lookup_rel` is a harmless miss.
+fn iter_ancestors(rel: &Path) -> impl Iterator<Item = &Path> {
+    rel.ancestors().skip(1)
 }
 
 fn collect_statuses(
@@ -440,6 +499,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(snap.lookup(Path::new("/repo/file")), PorcelainCode::CLEAN);
         assert_eq!(snap.lookup(Path::new("/elsewhere")), PorcelainCode::CLEAN);
@@ -452,6 +512,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses,
+            ..Default::default()
         };
         assert_eq!(snap.lookup(Path::new("/repo/a")), PorcelainCode::UNTRACKED);
     }
@@ -464,6 +525,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses,
+            ..Default::default()
         };
         assert!(snap.is_ignored(Path::new("/repo/ig")));
         assert!(!snap.is_ignored(Path::new("/repo/un")));
@@ -640,6 +702,7 @@ mod tests {
             PorcelainCode::RENAMED_WORKTREE,
             PorcelainCode::COPIED_WORKTREE,
             PorcelainCode::UNMERGED,
+            PorcelainCode::DIRTY_SUBTREE,
             PorcelainCode::BLANK,
         ];
         for (i, a) in codes.iter().enumerate() {
@@ -659,6 +722,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses,
+            ..Default::default()
         };
         assert_eq!(
             snap.lookup(Path::new("/repo/dir/file")),
@@ -680,6 +744,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses,
+            ..Default::default()
         };
         assert_eq!(
             snap.lookup(Path::new("/repo/ig/inside")),
@@ -700,6 +765,7 @@ mod tests {
         let snap = Snapshot {
             root: std::env::current_dir().unwrap(),
             statuses,
+            ..Default::default()
         };
         // A relative path that absolutises against the current dir into the
         // workdir should still match its status.
@@ -719,6 +785,7 @@ mod tests {
         let snap = Snapshot {
             root: canonical.clone(),
             statuses,
+            ..Default::default()
         };
         // The lexical strip succeeds but yields `sub/../file`; the canonicalize
         // fallback simplifies that to `file` so the lookup matches.
@@ -735,6 +802,7 @@ mod tests {
         let snap = Snapshot {
             root: canonical.join("nonexistent_root"),
             statuses: HashMap::new(),
+            ..Default::default()
         };
         // canonicalize succeeds but lands outside `root`, so the second
         // strip_prefix returns Err and `relativize` yields None.
@@ -748,6 +816,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(
             snap.lookup(Path::new("/repo/missing/../also-missing")),
@@ -779,6 +848,7 @@ mod tests {
         let snap = Snapshot {
             root: canonical,
             statuses,
+            ..Default::default()
         };
         // Path is reached via the directory symlink; lexical strip_prefix
         // fails because link_dir's path differs from the canonical root.
@@ -801,6 +871,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/definitely/not/the/cwd"),
             statuses: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(snap.lookup(Path::new("solo")), PorcelainCode::CLEAN);
     }
@@ -814,6 +885,7 @@ mod tests {
         let snap = Snapshot {
             root: canonical,
             statuses: HashMap::new(),
+            ..Default::default()
         };
         // A bare `..` has no file_name; lookup must not panic and must
         // return CLEAN (the parent dir of the tempdir is outside the root).
@@ -825,6 +897,7 @@ mod tests {
         let snap = Snapshot {
             root: PathBuf::from("/repo"),
             statuses: HashMap::new(),
+            ..Default::default()
         };
         assert_eq!(
             snap.lookup(Path::new("/elsewhere/file")),
@@ -959,5 +1032,87 @@ mod tests {
         assert_eq!(PorcelainCode::RENAMED_WORKTREE.worktree, 'R');
         assert_eq!(PorcelainCode::COPIED_WORKTREE.index, ' ');
         assert_eq!(PorcelainCode::COPIED_WORKTREE.worktree, 'C');
+    }
+
+    #[test]
+    fn dirty_ancestors_includes_parents_of_modified_file() {
+        let (_g, dir) = fresh_repo();
+        let nested = dir.path().join("a/b/c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("file"), b"orig\n").unwrap();
+        std::fs::create_dir(dir.path().join("sibling")).unwrap();
+        std::fs::write(dir.path().join("sibling/other"), b"x").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        std::fs::write(nested.join("file"), b"modified\n").unwrap();
+        let snap = snapshot_for(dir.path());
+        assert!(snap.has_dirty_descendants(&dir.path().join("a")));
+        assert!(snap.has_dirty_descendants(&dir.path().join("a/b")));
+        assert!(snap.has_dirty_descendants(&dir.path().join("a/b/c")));
+        assert!(!snap.has_dirty_descendants(&dir.path().join("sibling")));
+    }
+
+    #[test]
+    fn dirty_ancestors_excludes_ignored_descendants() {
+        let (_g, dir) = fresh_repo();
+        let sub = dir.path().join("dir");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("tracked"), b"x").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), b"dir/hidden\n").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        std::fs::write(sub.join("hidden"), b"x").unwrap();
+        let snap = snapshot_for(dir.path());
+        // `dir/hidden` is IGNORED; its ancestor `dir` must not be flagged.
+        assert!(!snap.has_dirty_descendants(&sub));
+    }
+
+    #[test]
+    fn dirty_ancestors_includes_untracked_in_tracked_dir() {
+        let (_g, dir) = fresh_repo();
+        let sub = dir.path().join("dir");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("tracked"), b"x").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        std::fs::write(sub.join("new"), b"x").unwrap();
+        let snap = snapshot_for(dir.path());
+        assert!(snap.has_dirty_descendants(&sub));
+    }
+
+    #[test]
+    fn dirty_ancestors_does_not_flag_clean_repo() {
+        let (_g, dir) = fresh_repo();
+        std::fs::write(dir.path().join("file"), b"x").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        let snap = snapshot_for(dir.path());
+        assert!(!snap.has_dirty_descendants(dir.path()));
+        assert!(!snap.has_dirty_descendants(&dir.path().join("file")));
+    }
+
+    #[test]
+    fn has_dirty_descendants_false_outside_root() {
+        let snap = Snapshot {
+            root: PathBuf::from("/repo"),
+            ..Default::default()
+        };
+        assert!(!snap.has_dirty_descendants(Path::new("/elsewhere/dir")));
+    }
+
+    #[test]
+    fn has_dirty_descendants_true_for_root_with_dirty_subtree() {
+        // `freshl -d <root>` needs the root row itself to flag a dirty tree.
+        let (_g, dir) = fresh_repo();
+        std::fs::write(dir.path().join("a"), b"x").unwrap();
+        run_git(dir.path(), &["add", "."]);
+        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.path().join("a"), b"changed").unwrap();
+        let snap = snapshot_for(dir.path());
+        assert!(snap.has_dirty_descendants(dir.path()));
+        assert_eq!(
+            snap.display_code_for(dir.path(), true),
+            PorcelainCode::DIRTY_SUBTREE,
+        );
     }
 }

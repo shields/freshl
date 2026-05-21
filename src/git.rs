@@ -147,10 +147,7 @@ impl Snapshot {
             return PorcelainCode::CLEAN;
         };
         let direct = self.lookup_rel(&rel);
-        if direct == PorcelainCode::CLEAN
-            && is_directory
-            && self.dirty_ancestors.contains(&rel)
-        {
+        if direct == PorcelainCode::CLEAN && is_directory && self.dirty_ancestors.contains(&rel) {
             PorcelainCode::DIRTY_SUBTREE
         } else {
             direct
@@ -282,9 +279,7 @@ pub fn discover(start: &Path) -> Option<Snapshot> {
     })
 }
 
-fn compute_dirty_ancestors(
-    statuses: &HashMap<PathBuf, PorcelainCode>,
-) -> HashSet<PathBuf> {
+fn compute_dirty_ancestors(statuses: &HashMap<PathBuf, PorcelainCode>) -> HashSet<PathBuf> {
     let mut out = HashSet::new();
     for (path, code) in statuses {
         if *code == PorcelainCode::CLEAN || *code == PorcelainCode::IGNORED {
@@ -1098,6 +1093,18 @@ mod tests {
             ..Default::default()
         };
         assert!(!snap.has_dirty_descendants(Path::new("/elsewhere/dir")));
+    }
+
+    #[test]
+    fn display_code_for_returns_clean_outside_root() {
+        let snap = Snapshot {
+            root: PathBuf::from("/repo"),
+            ..Default::default()
+        };
+        assert_eq!(
+            snap.display_code_for(Path::new("/elsewhere/dir"), true),
+            PorcelainCode::CLEAN,
+        );
     }
 
     #[test]

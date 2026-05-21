@@ -432,8 +432,8 @@ fn render_files(
 }
 
 fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<&Snapshot>) {
-    let code = snapshot
-        .map(|s| s.display_code_for(&entry.path, entry.kind == EntryKind::Directory));
+    let code =
+        snapshot.map(|s| s.display_code_for(&entry.path, entry.kind == EntryKind::Directory));
     if let Some(c) = code {
         row.git = Some(format::git_col::render(c));
     }

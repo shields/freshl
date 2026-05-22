@@ -12,82 +12,186 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anstyle::{AnsiColor, Color, Effects, Style};
+use anstyle::{AnsiColor, Color, Style};
 
 use crate::git::PorcelainCode;
 
-pub const WIDTH: usize = 2;
+pub const WIDTH: usize = 1;
 
 #[must_use]
 pub fn render(code: PorcelainCode) -> String {
     let style = style_for(code);
-    format!(
-        "{style}{}{}{}",
-        code.index,
-        code.worktree,
-        style.render_reset()
-    )
+    format!("{style}{}{}", code.glyph(), style.render_reset())
 }
 
 const fn style_for(code: PorcelainCode) -> Style {
     match code {
-        PorcelainCode::CLEAN | PorcelainCode::IGNORED => Style::new().effects(Effects::DIMMED),
-        PorcelainCode::UNTRACKED => Style::new().fg_color(Some(Color::Ansi(AnsiColor::Magenta))),
-        _ => Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow))),
+        PorcelainCode::CLEAN | PorcelainCode::IGNORED => return Style::new().dimmed(),
+        PorcelainCode::UNTRACKED => {
+            return Style::new().fg_color(Some(Color::Ansi(AnsiColor::Magenta)));
+        }
+        PorcelainCode::UNMERGED => {
+            return Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Red)))
+                .bold();
+        }
+        PorcelainCode::DIRTY_SUBTREE => {
+            return Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan)));
+        }
+        _ => {}
+    }
+    // Mutable states (single-column or merged combinations). Hue comes from
+    // the rendered glyph, derived from named constants where possible. The
+    // only literal glyph below is `+`: addition has no PorcelainCode
+    // constant — it only exists as an idx_char set in handle_tree_index.
+    let glyph = code.glyph();
+    let hue = if glyph == PorcelainCode::DELETED_WORKTREE.worktree {
+        AnsiColor::Red
+    } else if glyph == '+' {
+        AnsiColor::Green
+    } else {
+        AnsiColor::Cyan
+    };
+    let style = Style::new().fg_color(Some(Color::Ansi(hue)));
+    if code.index == ' ' {
+        style
+    } else {
+        style.bold()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use anstyle::{AnsiColor, Color, Effects};
+
+    use super::{render, style_for};
     use crate::git::PorcelainCode;
 
+    fn hue_of(code: PorcelainCode) -> Option<Color> {
+        style_for(code).get_fg_color()
+    }
+
+    fn is_bold(code: PorcelainCode) -> bool {
+        style_for(code).get_effects().contains(Effects::BOLD)
+    }
+
+    fn is_dimmed(code: PorcelainCode) -> bool {
+        style_for(code).get_effects().contains(Effects::DIMMED)
+    }
+
     #[test]
-    fn render_includes_both_chars() {
-        for code in [
-            PorcelainCode::CLEAN,
-            PorcelainCode::UNTRACKED,
-            PorcelainCode::IGNORED,
-            PorcelainCode::MODIFIED_WORKTREE,
-            PorcelainCode::DELETED_WORKTREE,
-            PorcelainCode::TYPE_CHANGE_WORKTREE,
-            PorcelainCode::RENAMED,
-            PorcelainCode::COPIED,
-            PorcelainCode::UNMERGED,
-            PorcelainCode::DIRTY_SUBTREE,
-        ] {
-            let s = render(code);
-            assert!(s.contains(code.index));
-            assert!(s.contains(code.worktree));
-        }
+    fn glyph_picks_worktree_when_set() {
+        assert_eq!(PorcelainCode::MODIFIED_WORKTREE.glyph(), '●');
+    }
+
+    #[test]
+    fn glyph_falls_back_to_index_when_worktree_blank() {
+        assert_eq!(PorcelainCode::RENAMED.glyph(), '→');
+        assert_eq!(PorcelainCode::DIRTY_SUBTREE.glyph(), '⋯');
+        assert_eq!(PorcelainCode::BLANK.with_index('+').glyph(), '+');
+    }
+
+    #[test]
+    fn render_wraps_glyph_in_ansi() {
+        let s = render(PorcelainCode::MODIFIED_WORKTREE);
+        assert!(s.contains('●'));
+        assert!(s.starts_with("\x1b["));
+        assert!(s.ends_with("\x1b[0m"));
     }
 
     #[test]
     fn clean_and_ignored_are_dimmed() {
-        for code in [PorcelainCode::CLEAN, PorcelainCode::IGNORED] {
-            let s = render(code);
-            assert!(s.contains("\x1b[2m"));
-        }
+        assert!(is_dimmed(PorcelainCode::CLEAN));
+        assert!(is_dimmed(PorcelainCode::IGNORED));
     }
 
     #[test]
     fn untracked_is_magenta() {
-        let s = render(PorcelainCode::UNTRACKED);
-        assert!(s.contains("\x1b[35m"));
+        assert_eq!(
+            hue_of(PorcelainCode::UNTRACKED),
+            Some(Color::Ansi(AnsiColor::Magenta))
+        );
     }
 
     #[test]
-    fn modifications_are_yellow() {
-        let s = render(PorcelainCode::MODIFIED_WORKTREE);
-        assert!(s.contains("\x1b[33m"));
+    fn addition_is_bold_green() {
+        let staged_add = PorcelainCode::BLANK.with_index('+');
+        assert_eq!(hue_of(staged_add), Some(Color::Ansi(AnsiColor::Green)));
+        assert!(is_bold(staged_add));
     }
 
     #[test]
-    fn dirty_subtree_is_yellow_asterisk() {
-        let s = render(PorcelainCode::DIRTY_SUBTREE);
-        assert!(s.contains('*'));
-        assert!(s.contains("\x1b[33m"));
-        // Must NOT be dimmed — that's reserved for CLEAN/IGNORED.
-        assert!(!s.contains("\x1b[2m"));
+    fn modification_is_cyan() {
+        assert_eq!(
+            hue_of(PorcelainCode::MODIFIED_WORKTREE),
+            Some(Color::Ansi(AnsiColor::Cyan))
+        );
+    }
+
+    #[test]
+    fn deletion_is_red() {
+        assert_eq!(
+            hue_of(PorcelainCode::DELETED_WORKTREE),
+            Some(Color::Ansi(AnsiColor::Red))
+        );
+    }
+
+    #[test]
+    fn type_change_is_cyan() {
+        assert_eq!(
+            hue_of(PorcelainCode::TYPE_CHANGE_WORKTREE),
+            Some(Color::Ansi(AnsiColor::Cyan))
+        );
+    }
+
+    #[test]
+    fn rename_is_cyan() {
+        assert_eq!(
+            hue_of(PorcelainCode::RENAMED_WORKTREE),
+            Some(Color::Ansi(AnsiColor::Cyan))
+        );
+    }
+
+    #[test]
+    fn copy_is_cyan() {
+        assert_eq!(
+            hue_of(PorcelainCode::COPIED_WORKTREE),
+            Some(Color::Ansi(AnsiColor::Cyan))
+        );
+    }
+
+    #[test]
+    fn staged_change_is_bold() {
+        assert!(is_bold(PorcelainCode::RENAMED));
+    }
+
+    #[test]
+    fn worktree_only_change_is_not_bold() {
+        assert!(!is_bold(PorcelainCode::MODIFIED_WORKTREE));
+    }
+
+    #[test]
+    fn staged_and_worktree_modify_is_bold_cyan() {
+        let combo = PorcelainCode::MODIFIED_WORKTREE.with_index('●');
+        assert_eq!(hue_of(combo), Some(Color::Ansi(AnsiColor::Cyan)));
+        assert!(is_bold(combo));
+    }
+
+    #[test]
+    fn dirty_subtree_is_cyan() {
+        assert_eq!(
+            hue_of(PorcelainCode::DIRTY_SUBTREE),
+            Some(Color::Ansi(AnsiColor::Cyan))
+        );
+        assert!(!is_dimmed(PorcelainCode::DIRTY_SUBTREE));
+    }
+
+    #[test]
+    fn conflict_is_red_bold() {
+        assert_eq!(
+            hue_of(PorcelainCode::UNMERGED),
+            Some(Color::Ansi(AnsiColor::Red))
+        );
+        assert!(is_bold(PorcelainCode::UNMERGED));
     }
 }

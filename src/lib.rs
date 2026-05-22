@@ -1264,10 +1264,10 @@ mod tests {
         let code = run(os(&[file.to_str().unwrap()]), &mut out, &mut err);
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
-        // Staged addition gets `A `; covers the `any_git = true` branch in
+        // Staged addition gets `+`; covers the `any_git = true` branch in
         // render_files.
         assert!(
-            text.contains('A'),
+            text.contains('+'),
             "expected git column for staged add: {text}"
         );
     }

@@ -124,7 +124,7 @@ fn git_repo_tracks_clean_files() {
     let (code, out, _err) = run_paths(&[dir.path()]);
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
     assert!(out.contains("kept"));
-    assert!(out.contains('✓'));
+    assert!(out.contains('○'));
 }
 
 #[test]
@@ -146,8 +146,16 @@ fn git_repo_marks_untracked_and_ignored() {
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
     assert!(out.contains("brand_new"));
     assert!(out.contains("junk.tar"));
-    assert!(out.contains("??"));
-    assert!(out.contains("!!"));
+    assert!(
+        out.lines()
+            .any(|l| l.contains("brand_new") && l.contains('?')),
+        "expected ? for untracked brand_new in: {out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.contains("junk.tar") && l.contains('·')),
+        "expected · for ignored junk.tar in: {out}"
+    );
 }
 
 #[test]
@@ -167,7 +175,7 @@ fn git_repo_marks_modified_in_worktree() {
         .find(|l| l.contains(" a"))
         .expect("row for a exists");
     assert!(
-        line.contains('M'),
+        line.contains('●'),
         "expected modified marker in line: {line}"
     );
 }
@@ -190,8 +198,8 @@ fn git_repo_marks_staged_modification() {
         .find(|l| l.contains(" staged"))
         .expect("row for staged exists");
     assert!(
-        line.contains('M'),
-        "expected M for staged modification: {line}"
+        line.contains('●'),
+        "expected ● for staged modification: {line}"
     );
 }
 
@@ -230,7 +238,7 @@ fn git_repo_marks_addition_staged() {
         .lines()
         .find(|l| l.contains(" fresh"))
         .expect("row for fresh exists");
-    assert!(line.contains('A'), "expected A for new file: {line}");
+    assert!(line.contains('+'), "expected + for new file: {line}");
 }
 
 #[test]
@@ -284,7 +292,7 @@ fn git_repo_marks_renamed() {
         .lines()
         .find(|l| l.contains(" newname"))
         .expect("row for newname exists");
-    assert!(line.contains('R'), "expected R for renamed: {line}");
+    assert!(line.contains('→'), "expected → for renamed: {line}");
 }
 
 #[test]
@@ -323,9 +331,7 @@ fn git_repo_marks_type_change() {
         .lines()
         .find(|l| l.contains("shifter"))
         .expect("row for shifter exists");
-    // Match " T" (space-T) to anchor on the git column rather than the ISO
-    // timestamp's T (which is preceded by a digit, not a space).
-    assert!(line.contains(" T"), "expected T for type change: {line}");
+    assert!(line.contains('≈'), "expected ≈ for type change: {line}");
 }
 
 #[test]
@@ -354,7 +360,7 @@ fn git_repo_marks_unmerged_conflict() {
         .lines()
         .find(|l| l.contains(" clash"))
         .expect("row for clash exists");
-    assert!(line.contains('U'), "expected U for unmerged: {line}");
+    assert!(line.contains('✘'), "expected ✘ for unmerged: {line}");
 }
 
 #[test]

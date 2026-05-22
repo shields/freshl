@@ -31,7 +31,7 @@ impl PorcelainCode {
         worktree: ' ',
     };
     pub const CLEAN: Self = Self {
-        index: '✓',
+        index: '○',
         worktree: ' ',
     };
     pub const UNTRACKED: Self = Self {
@@ -39,43 +39,43 @@ impl PorcelainCode {
         worktree: '?',
     };
     pub const IGNORED: Self = Self {
-        index: '!',
-        worktree: '!',
+        index: '·',
+        worktree: '·',
     };
     pub const MODIFIED_WORKTREE: Self = Self {
         index: ' ',
-        worktree: 'M',
+        worktree: '●',
     };
     pub const DELETED_WORKTREE: Self = Self {
         index: ' ',
-        worktree: 'D',
+        worktree: '▽',
     };
     pub const TYPE_CHANGE_WORKTREE: Self = Self {
         index: ' ',
-        worktree: 'T',
+        worktree: '≈',
     };
     pub const RENAMED: Self = Self {
-        index: 'R',
+        index: '→',
         worktree: ' ',
     };
     pub const COPIED: Self = Self {
-        index: 'C',
+        index: '⇉',
         worktree: ' ',
     };
     pub const RENAMED_WORKTREE: Self = Self {
         index: ' ',
-        worktree: 'R',
+        worktree: '→',
     };
     pub const COPIED_WORKTREE: Self = Self {
         index: ' ',
-        worktree: 'C',
+        worktree: '⇉',
     };
     pub const UNMERGED: Self = Self {
-        index: 'U',
-        worktree: 'U',
+        index: '✘',
+        worktree: '✘',
     };
     pub const DIRTY_SUBTREE: Self = Self {
-        index: '*',
+        index: '⋯',
         worktree: ' ',
     };
 
@@ -84,6 +84,16 @@ impl PorcelainCode {
         Self {
             index: idx,
             worktree: self.worktree,
+        }
+    }
+
+    /// The single glyph rendered for this code: worktree wins, index is the fallback.
+    #[must_use]
+    pub const fn glyph(self) -> char {
+        if self.worktree == ' ' {
+            self.index
+        } else {
+            self.worktree
         }
     }
 }
@@ -373,10 +383,10 @@ fn handle_index_worktree(
 
 fn handle_tree_index(change: &gix::diff::index::Change, out: &mut HashMap<PathBuf, PorcelainCode>) {
     let (rel, idx_char) = match change {
-        gix::diff::index::Change::Addition { location, .. } => (location, 'A'),
-        gix::diff::index::Change::Deletion { location, .. } => (location, 'D'),
-        gix::diff::index::Change::Modification { location, .. } => (location, 'M'),
-        gix::diff::index::Change::Rewrite { location, .. } => (location, 'R'),
+        gix::diff::index::Change::Addition { location, .. } => (location, '+'),
+        gix::diff::index::Change::Deletion { location, .. } => (location, '▽'),
+        gix::diff::index::Change::Modification { location, .. } => (location, '●'),
+        gix::diff::index::Change::Rewrite { location, .. } => (location, '→'),
     };
     let path = rela_to_pathbuf(rel);
     let existing = out.get(&path).copied().unwrap_or(PorcelainCode::BLANK);
@@ -466,27 +476,27 @@ mod tests {
     #[test]
     fn merge_keeps_prior_index_and_takes_next_worktree() {
         let prev = PorcelainCode {
-            index: 'A',
+            index: '+',
             worktree: ' ',
         };
         let m = merge(Some(prev), PorcelainCode::MODIFIED_WORKTREE);
-        assert_eq!(m.index, 'A');
-        assert_eq!(m.worktree, 'M');
+        assert_eq!(m.index, '+');
+        assert_eq!(m.worktree, '●');
     }
 
     #[test]
     fn merge_keeps_prior_worktree_when_next_is_blank() {
         let prev = PorcelainCode {
             index: ' ',
-            worktree: 'D',
+            worktree: '▽',
         };
         let next = PorcelainCode {
-            index: 'M',
+            index: '●',
             worktree: ' ',
         };
         let m = merge(Some(prev), next);
-        assert_eq!(m.index, 'M');
-        assert_eq!(m.worktree, 'D');
+        assert_eq!(m.index, '●');
+        assert_eq!(m.worktree, '▽');
     }
 
     #[test]
@@ -592,7 +602,7 @@ mod tests {
         std::fs::write(dir.path().join("staged"), b"hi").unwrap();
         run_git(dir.path(), &["add", "staged"]);
         let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "staged").index, 'A');
+        assert_eq!(status_at(&snap, "staged").index, '+');
     }
 
     #[test]
@@ -604,7 +614,7 @@ mod tests {
         std::fs::write(dir.path().join("m"), b"two\n").unwrap();
         run_git(dir.path(), &["add", "m"]);
         let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "m").index, 'M');
+        assert_eq!(status_at(&snap, "m").index, '●');
     }
 
     #[test]
@@ -615,7 +625,7 @@ mod tests {
         run_git(dir.path(), &["commit", "-q", "-m", "d"]);
         run_git(dir.path(), &["rm", "-q", "d"]);
         let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "d").index, 'D');
+        assert_eq!(status_at(&snap, "d").index, '▽');
     }
 
     #[test]
@@ -642,7 +652,7 @@ mod tests {
         run_git(dir.path(), &["commit", "-q", "-m", "from"]);
         run_git(dir.path(), &["mv", "from", "to"]);
         let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "to").index, 'R');
+        assert_eq!(status_at(&snap, "to").index, '→');
     }
 
     #[test]
@@ -705,9 +715,9 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
-        let with = PorcelainCode::MODIFIED_WORKTREE.with_index('A');
-        assert_eq!(with.index, 'A');
-        assert_eq!(with.worktree, 'M');
+        let with = PorcelainCode::MODIFIED_WORKTREE.with_index('+');
+        assert_eq!(with.index, '+');
+        assert_eq!(with.worktree, '●');
     }
 
     #[test]
@@ -1024,9 +1034,9 @@ mod tests {
         // Worktree-only renames should mark the worktree column so they don't
         // visually masquerade as staged changes.
         assert_eq!(PorcelainCode::RENAMED_WORKTREE.index, ' ');
-        assert_eq!(PorcelainCode::RENAMED_WORKTREE.worktree, 'R');
+        assert_eq!(PorcelainCode::RENAMED_WORKTREE.worktree, '→');
         assert_eq!(PorcelainCode::COPIED_WORKTREE.index, ' ');
-        assert_eq!(PorcelainCode::COPIED_WORKTREE.worktree, 'C');
+        assert_eq!(PorcelainCode::COPIED_WORKTREE.worktree, '⇉');
     }
 
     #[test]

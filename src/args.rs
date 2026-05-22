@@ -105,13 +105,16 @@ where
             return Ok(Action::Help);
         } else if bytes == b"--version" {
             return Ok(Action::Version);
-        } else if bytes.len() >= 2 && bytes[0] == b'-' && bytes[1] != b'-' {
+        } else if let Some(cluster) = bytes.strip_prefix(b"-")
+            && let Some(&first) = cluster.first()
+            && first != b'-'
+        {
             // Short-flag cluster. `-h` anywhere short-circuits to help; check
             // first so we don't mutate `options` only to throw the result away.
-            if bytes[1..].contains(&b'h') {
+            if cluster.contains(&b'h') {
                 return Ok(Action::Help);
             }
-            for &b in &bytes[1..] {
+            for &b in cluster {
                 match b {
                     b'R' => options.recursive = true,
                     b'S' => options.sort_key = SortKey::Size,

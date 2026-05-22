@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration tests can panic on setup failures; allow .unwrap() in helpers too, not just #[test] bodies"
+)]
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
@@ -88,7 +93,8 @@ fn device_files_show_rdev_as_hex_in_size_column() {
         .find(|l| l.contains("/dev/null"))
         .expect("expected a row for /dev/null");
     let has_hex_token = line.split_whitespace().any(|t| {
-        t.starts_with("0x") && t.len() > 2 && t[2..].chars().all(|c| c.is_ascii_hexdigit())
+        t.strip_prefix("0x")
+            .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_hexdigit()))
     });
     assert!(has_hex_token, "expected a 0x<hex> token in row: {line}");
 }

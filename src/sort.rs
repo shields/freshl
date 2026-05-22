@@ -28,8 +28,11 @@ pub enum SortKey {
 }
 
 fn strip_leading_zeros(digits: &[u8]) -> &[u8] {
-    let lead = digits.iter().take_while(|b| **b == b'0').count();
-    &digits[lead..]
+    let first = digits
+        .iter()
+        .position(|&b| b != b'0')
+        .unwrap_or(digits.len());
+    digits.get(first..).unwrap_or(&[])
 }
 
 fn compare_digit_runs(a: &[u8], b: &[u8]) -> Ordering {
@@ -94,19 +97,24 @@ pub fn sort(entries: &mut [Entry], sensitivity: Sensitivity) {
     sort_with(entries, sensitivity, SortKey::Name, false);
 }
 
+/// Compare two byte strings using natural order (digit runs as numbers).
+///
+/// # Panics
+///
+/// Does not panic: internal `.expect()` sites hold by construction.
 #[must_use]
 pub fn natural_cmp(a: &OsStr, b: &OsStr, sensitivity: Sensitivity) -> Ordering {
     let mut i = 0;
     let mut j = 0;
     let ab = a.as_bytes();
     let bb = b.as_bytes();
-    while i < ab.len() && j < bb.len() {
-        let ca = ab[i];
-        let cb = bb[j];
+    while let (Some(&ca), Some(&cb)) = (ab.get(i), bb.get(j)) {
         if ca.is_ascii_digit() && cb.is_ascii_digit() {
             let ai = digit_run_end(ab, i);
             let bj = digit_run_end(bb, j);
-            match compare_digit_runs(&ab[i..ai], &bb[j..bj]) {
+            let a_run = ab.get(i..ai).expect("digit_run_end keeps i..ai in bounds");
+            let b_run = bb.get(j..bj).expect("digit_run_end keeps j..bj in bounds");
+            match compare_digit_runs(a_run, b_run) {
                 Ordering::Equal => {
                     i = ai;
                     j = bj;
@@ -143,7 +151,10 @@ pub fn natural_cmp(a: &OsStr, b: &OsStr, sensitivity: Sensitivity) -> Ordering {
 
 fn digit_run_end(bytes: &[u8], start: usize) -> usize {
     let mut i = start;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
+    while let Some(&b) = bytes.get(i) {
+        if !b.is_ascii_digit() {
+            break;
+        }
         i += 1;
     }
     i

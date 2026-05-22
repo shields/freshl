@@ -375,13 +375,13 @@ mod tests {
     fn collect_errors_on_missing_path() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nope");
-        assert!(collect_directory(&missing).is_err());
+        collect_directory(&missing).unwrap_err();
     }
 
     #[test]
     fn entry_for_path_errors_on_missing() {
         let dir = tempdir().unwrap();
-        assert!(entry_for_path(&dir.path().join("nope")).is_err());
+        entry_for_path(&dir.path().join("nope")).unwrap_err();
     }
 
     #[test]

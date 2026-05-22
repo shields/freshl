@@ -36,6 +36,20 @@ const DAY: u64 = 24 * HOUR;
 // visually — this tier is a soft age cue, not a precise calendar comparison.
 const YEAR: u64 = 365 * DAY;
 
+/// Decompose `YYYY[Y...]-MM-DDTHH:MM:SSZ` by separators. Year width is
+/// variable (jiff can emit more digits for out-of-range years and a leading
+/// `-` for BC years), so split the date fields from the right.
+/// Returns the six field substrings or `None` if any separator is missing.
+fn parse_iso8601_z(s: &str) -> Option<(&str, &str, &str, &str, &str, &str)> {
+    let (date_str, after_t) = s.split_once('T')?;
+    let (year_month, day) = date_str.rsplit_once('-')?;
+    let (year, month) = year_month.rsplit_once('-')?;
+    let (hh, after_hh) = after_t.split_once(':')?;
+    let (mm, ss_with_z) = after_hh.split_once(':')?;
+    let ss = ss_with_z.strip_suffix('Z')?;
+    Some((year, month, day, hh, mm, ss))
+}
+
 /// Stale timestamps fade progressively by age so the eye lands on what's fresh.
 ///
 /// Date dim always cascades from the left so the bright remainder is a single
@@ -52,52 +66,46 @@ const YEAR: u64 = 365 * DAY;
 ///
 /// # Panics
 ///
-/// Panics if `format_time`'s output lacks `T` between the date and time fields.
-/// This never happens: both of its return paths emit `T`.
+/// Panics if `format_time`'s output does not match `YYYY-MM-DDTHH:MM:SSZ`.
+/// Both of `format_time`'s return paths emit that shape.
 #[must_use]
 pub fn format_time_styled(time: SystemTime, now: SystemTime, dim: Style) -> String {
     use std::fmt::Write;
     let plain = format_time(time);
-    let bytes = plain.as_bytes();
-    let len = bytes.len();
-    let past_secs = match now.duration_since(time) {
-        Ok(d) => d.as_secs(),
-        Err(_) => return plain,
+    let Ok(past) = now.duration_since(time) else {
+        return plain;
     };
+    let past_secs = past.as_secs();
 
-    // Year width is variable (jiff zero-pads to 4 digits but can emit more for
-    // out-of-range years), so locate `T` rather than indexing from either end.
-    // The invariant is enforced by `format_time` itself, whose only two return
-    // paths both emit `T` between the date and time fields.
-    let t_pos = plain.find('T').expect("format_time always emits 'T'");
-    let year_end = t_pos - 5; // year + `-`
-    let month_end = t_pos - 2; // year + `-` + month + `-`
+    let (year, month, day, hh, mm, ss) =
+        parse_iso8601_z(&plain).expect("format_time emits YYYY-MM-DDTHH:MM:SSZ");
 
-    let mut mask = vec![false; len];
-    mask[t_pos] = true;
-    mask[len - 1] = true;
-    if past_secs < DAY {
-        mask[..month_end].fill(true);
-    } else if past_secs < YEAR {
-        mask[..year_end].fill(true);
-    }
-    if past_secs >= DAY {
-        mask[t_pos + 1..(t_pos + 9).min(len)].fill(true);
-    } else if past_secs >= HOUR {
-        mask[t_pos + 6..(t_pos + 9).min(len)].fill(true);
-    }
+    let segs: [(&str, bool); 12] = [
+        (year, past_secs < YEAR),
+        ("-", past_secs < YEAR),
+        (month, past_secs < DAY),
+        ("-", past_secs < DAY),
+        (day, false),
+        ("T", true),
+        (hh, past_secs >= DAY),
+        (":", past_secs >= DAY),
+        (mm, past_secs >= DAY),
+        (":", past_secs >= HOUR),
+        (ss, past_secs >= HOUR),
+        ("Z", true),
+    ];
 
-    let mut out = String::with_capacity(len + 8);
+    let mut out = String::with_capacity(plain.len() + 8);
     let mut opened = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        if mask[i] && !opened {
+    for (text, dim_seg) in segs {
+        if dim_seg && !opened {
             let _ = write!(out, "{dim}");
             opened = true;
-        } else if !mask[i] && opened {
+        } else if !dim_seg && opened {
             let _ = write!(out, "{}", dim.render_reset());
             opened = false;
         }
-        out.push(b as char);
+        out.push_str(text);
     }
     if opened {
         let _ = write!(out, "{}", dim.render_reset());
@@ -107,9 +115,37 @@ pub fn format_time_styled(time: SystemTime, now: SystemTime, dim: Style) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{format_time, format_time_styled};
+    use super::{format_time, format_time_styled, parse_iso8601_z};
     use anstyle::{Effects, Style};
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn parse_iso8601_z_accepts_well_formed_input() {
+        assert_eq!(
+            parse_iso8601_z("2026-05-01T09:40:17Z"),
+            Some(("2026", "05", "01", "09", "40", "17"))
+        );
+    }
+
+    #[test]
+    fn parse_iso8601_z_keeps_negative_year_sign() {
+        // jiff emits a leading `-` for BC years. The year segment must keep
+        // the sign; month/day must not absorb it.
+        assert_eq!(
+            parse_iso8601_z("-0044-03-15T12:00:00Z"),
+            Some(("-0044", "03", "15", "12", "00", "00"))
+        );
+    }
+
+    #[test]
+    fn parse_iso8601_z_rejects_missing_separators() {
+        assert_eq!(parse_iso8601_z(""), None); // no T
+        assert_eq!(parse_iso8601_z("2026T09:40:17Z"), None); // no first -
+        assert_eq!(parse_iso8601_z("2026-05T09:40:17Z"), None); // no second -
+        assert_eq!(parse_iso8601_z("2026-05-01T0940:17Z"), None); // no first :
+        assert_eq!(parse_iso8601_z("2026-05-01T09:4017Z"), None); // no second :
+        assert_eq!(parse_iso8601_z("2026-05-01T09:40:17"), None); // no trailing Z
+    }
 
     fn dim() -> Style {
         Style::new().effects(Effects::DIMMED)

@@ -67,11 +67,12 @@ pub fn flip_first_ascii_letter(name: &OsStr) -> Option<OsString> {
     let bytes = name.as_bytes();
     let pos = bytes.iter().position(u8::is_ascii_alphabetic)?;
     let mut out = bytes.to_vec();
-    out[pos] = if out[pos].is_ascii_uppercase() {
-        out[pos].to_ascii_lowercase()
+    let byte = out.get_mut(pos)?;
+    if byte.is_ascii_uppercase() {
+        byte.make_ascii_lowercase();
     } else {
-        out[pos].to_ascii_uppercase()
-    };
+        byte.make_ascii_uppercase();
+    }
     Some(OsString::from_vec(out))
 }
 

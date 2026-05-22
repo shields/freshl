@@ -979,7 +979,7 @@ mod tests {
         // is returned from the map rather than from a fresh walk.
         assert!(cache.for_target(dir.path()).is_none());
         assert!(cache.by_scope.contains_key(&canon));
-        assert!(cache.by_scope.get(&canon).unwrap().is_none());
+        assert!(cache.by_scope[&canon].is_none());
     }
 
     #[test]

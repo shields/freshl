@@ -79,10 +79,13 @@ impl Caches {
 /// by setting it to a known mask and immediately restoring. Safe for freshl
 /// because this runs once at startup before any thread is spawned that could
 /// race a concurrent `open(2)`.
-// `RawMode` (the underlying type of `Mode::bits()`) is `u16` on macOS/BSD and
-// `u32` on Linux; `.into()` widens uniformly. The `useless_conversion` allow
-// covers the Linux identity case.
-#[allow(clippy::useless_conversion)]
+#[cfg_attr(
+    target_os = "linux",
+    expect(
+        clippy::useless_conversion,
+        reason = "`RawMode` is u32 on Linux but u16 on macOS/BSD; `.into()` widens uniformly across platforms"
+    )
+)]
 fn read_umask() -> u32 {
     use rustix::fs::Mode;
     use rustix::process::umask;
@@ -545,15 +548,19 @@ mod tests {
 
     #[test]
     fn failing_writer_flush_is_a_noop() {
-        assert!(FailingWriter.flush().is_ok());
+        FailingWriter.flush().unwrap();
     }
 
     #[test]
+    #[expect(
+        clippy::unused_io_amount,
+        reason = "exercises the Write impl's Ok/Err discrimination, not stream byte counts"
+    )]
     fn fail_on_newline_writer_eventually_errors() {
         let mut w = FailOnNewline::new(1);
-        assert!(w.write(b"first\n").is_ok());
-        assert!(w.write(b"second\n").is_err());
-        assert!(w.flush().is_ok());
+        w.write(b"first\n").unwrap();
+        w.write(b"second\n").unwrap_err();
+        w.flush().unwrap();
     }
 
     #[test]
@@ -1308,8 +1315,7 @@ mod tests {
         // row's CLAUDE.md and confirm an arrow + AGENTS.md follow it.
         assert!(text.contains('→'), "no arrow: {text}");
         let arrow = text.find('→').unwrap();
-        let pre = &text[..arrow];
-        let post = &text[arrow..];
+        let (pre, post) = text.split_at(arrow);
         assert!(
             pre.contains("CLAUDE.md"),
             "link name must precede arrow: {text}"

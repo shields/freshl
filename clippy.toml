@@ -1,0 +1,5 @@
+# Allow panic-y patterns inside test code. Production code stays strict.
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true

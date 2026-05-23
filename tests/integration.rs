@@ -13,6 +13,10 @@
 // limitations under the License.
 
 #![expect(
+    clippy::tests_outside_test_module,
+    reason = "Cargo integration tests live at the file's module root"
+)]
+#![expect(
     clippy::unwrap_used,
     reason = "integration tests can panic on setup failures; allow .unwrap() in helpers too, not just #[test] bodies"
 )]

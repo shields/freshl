@@ -88,6 +88,7 @@ dbg_macro                       = "deny"
 infallible_try_from             = "deny"
 clone_on_ref_ptr                = "deny"
 verbose_file_reads              = "deny"
+tests_outside_test_module       = "deny"
 # Force every suppression to be deliberate + documented
 allow_attributes                = "deny"
 allow_attributes_without_reason = "deny"

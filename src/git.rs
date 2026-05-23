@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -98,15 +99,62 @@ impl PorcelainCode {
     }
 }
 
-#[derive(Debug, Default)]
+/// Per-repository view used for status rendering.
+///
+/// The lookup invariant: `PorcelainCode::CLEAN` is returned *only* when the
+/// path has positive proof of being in the index. Anything else is
+/// `IGNORED`, `UNTRACKED`, or one of the change codes — never `CLEAN` by
+/// default. Achieving that requires three sources of truth:
+///   - `statuses`: what the status walk reported (changes + collapsed
+///     untracked/ignored dirs).
+///   - `tracked_prefixes`: every indexed path *and* all of its ancestor
+///     directories, so a directory row counts as "tracked" iff at least one
+///     of its descendants is in the index.
+///   - `excludes`: a gix exclude stack consulted on demand for paths that
+///     are neither in `statuses` nor in `tracked_prefixes`.
+///
+/// `repo` is held because the detached exclude stack's `at_path` call
+/// requires the repository's object database to resolve in-tree
+/// `.gitignore` files.
 pub struct Snapshot {
     pub root: PathBuf,
     pub statuses: HashMap<PathBuf, PorcelainCode>,
     dirty_ancestors: HashSet<PathBuf>,
+    tracked_prefixes: HashSet<PathBuf>,
+    /// Index entries with `Mode::COMMIT` — submodule gitlinks. The parent
+    /// repo doesn't track contents under these paths; the submodule does.
+    /// Used by `lookup_rel` to classify submodule descendants as CLEAN
+    /// instead of UNTRACKED.
+    submodule_roots: HashSet<PathBuf>,
+    repo: gix::Repository,
+    excludes: RefCell<gix::worktree::Stack>,
+}
+
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `gix::worktree::Stack` doesn't impl Debug; render a compact view.
+        f.debug_struct("Snapshot")
+            .field("root", &self.root)
+            .field("statuses", &self.statuses)
+            .field("dirty_ancestors", &self.dirty_ancestors)
+            .field("tracked_prefixes_len", &self.tracked_prefixes.len())
+            .field("submodule_roots", &self.submodule_roots)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Snapshot {
-    /// Resolve `path` to its `PorcelainCode`, defaulting to [`PorcelainCode::CLEAN`].
+    /// Resolve `path` to its `PorcelainCode`.
+    ///
+    /// Unknown paths are classified as `UNTRACKED` (or `IGNORED` if the
+    /// exclude stack matches) — never `CLEAN`. `CLEAN` is reserved for
+    /// paths the index has positive proof of (see `lookup_rel`).
+    /// Paths outside the snapshot's workdir return [`PorcelainCode::BLANK`]
+    /// so cross-repo arguments render no glyph instead of a spurious `?`.
+    ///
+    /// Filesystem kind probing is deferred to the cold path — only the
+    /// exclude check needs it, so `lookup`'s common case (path is in
+    /// `statuses`/`tracked_prefixes`) avoids any `stat` syscall.
     ///
     /// Path normalisation tries lexical absolutisation first (cheap, preserves
     /// symlink identity for entries that are themselves symlinks). If the
@@ -115,11 +163,26 @@ impl Snapshot {
     /// covers symlinked workdirs and `freshl ..` style paths.
     #[must_use]
     pub fn lookup(&self, path: &Path) -> PorcelainCode {
-        self.relativize(path)
-            .map_or(PorcelainCode::CLEAN, |rel| self.lookup_rel(&rel))
+        let Some(rel) = self.relativize(path) else {
+            return PorcelainCode::BLANK;
+        };
+        // `symlink_metadata` (lstat) so a symlink itself reports `is_dir=false`,
+        // matching git's "symlinks to directories are not considered directories
+        // for the purpose of matching" rule. `metadata` would follow the link
+        // and cause directory-only patterns (e.g. `vendor/`) to match symlinks.
+        self.lookup_rel(&rel, || {
+            std::fs::symlink_metadata(path).ok().map(|m| m.is_dir())
+        })
     }
 
-    fn lookup_rel(&self, rel: &Path) -> PorcelainCode {
+    /// Resolve `rel` to its `PorcelainCode`. `kind_resolver` is called at most
+    /// once and only when the exclude check needs to know whether `rel` is a
+    /// directory (i.e. only on the cold path).
+    fn lookup_rel<F: FnOnce() -> Option<bool>>(
+        &self,
+        rel: &Path,
+        kind_resolver: F,
+    ) -> PorcelainCode {
         if let Some(code) = self.statuses.get(rel).copied() {
             return code;
         }
@@ -129,8 +192,50 @@ impl Snapshot {
             {
                 return code;
             }
+            // A submodule gitlink ancestor means the parent repo delegates
+            // this subtree to the submodule — classify descendants as CLEAN
+            // so the listing doesn't drown in spurious `?` glyphs.
+            if self.submodule_roots.contains(ancestor) {
+                return PorcelainCode::CLEAN;
+            }
         }
-        PorcelainCode::CLEAN
+        // The status walk had no entry for this path. Resolve by positive
+        // proof: CLEAN requires the path (or a descendant) to be in the
+        // index; otherwise it's IGNORED (matches an exclude rule) or
+        // UNTRACKED.
+        if self.tracked_prefixes.contains(rel) {
+            return PorcelainCode::CLEAN;
+        }
+        if self.path_is_excluded(rel, kind_resolver()) {
+            PorcelainCode::IGNORED
+        } else {
+            PorcelainCode::UNTRACKED
+        }
+    }
+
+    fn path_is_excluded(&self, rel: &Path, is_directory: Option<bool>) -> bool {
+        // Unknown kind (e.g. lookup on a path that doesn't exist on disk):
+        // try both modes. Patterns either gate on `MUST_BE_DIR` or don't,
+        // so checking both is a strict superset — no risk of a false hit.
+        is_directory.map_or_else(
+            || self.check_excluded(rel, true) || self.check_excluded(rel, false),
+            |d| self.check_excluded(rel, d),
+        )
+    }
+
+    fn check_excluded(&self, rel: &Path, is_directory: bool) -> bool {
+        let mode = if is_directory {
+            gix::index::entry::Mode::DIR
+        } else {
+            gix::index::entry::Mode::FILE
+        };
+        // `is_ok_and` short-circuits an `at_path` error to "not excluded".
+        // The exclude stack reads `.gitignore` files lazily; a transient
+        // I/O error mid-walk shouldn't crash the lookup.
+        self.excludes
+            .borrow_mut()
+            .at_path(rel, Some(mode), &self.repo.objects)
+            .is_ok_and(|p| p.is_excluded())
     }
 
     #[must_use]
@@ -150,13 +255,14 @@ impl Snapshot {
 
     /// Returns `DIRTY_SUBTREE` for a tracked-clean directory whose subtree
     /// has dirty descendants; otherwise behaves like [`Self::lookup`].
-    /// Single path-normalisation for both checks.
+    /// Single path-normalisation for both checks. Outside-root paths return
+    /// [`PorcelainCode::BLANK`] (no glyph), matching [`Self::lookup`].
     #[must_use]
     pub fn display_code_for(&self, path: &Path, is_directory: bool) -> PorcelainCode {
         let Some(rel) = self.relativize(path) else {
-            return PorcelainCode::CLEAN;
+            return PorcelainCode::BLANK;
         };
-        let direct = self.lookup_rel(&rel);
+        let direct = self.lookup_rel(&rel, || Some(is_directory));
         if direct == PorcelainCode::CLEAN && is_directory && self.dirty_ancestors.contains(&rel) {
             PorcelainCode::DIRTY_SUBTREE
         } else {
@@ -233,12 +339,7 @@ fn build_snapshot(scope: &Path) -> Option<Snapshot> {
     let workdir = normalize_existing(repo.workdir()?)?;
     let pathspec = pathspec_for(scope, &workdir)?;
     let statuses = collect_statuses(&repo, pathspec).unwrap_or_default();
-    let dirty_ancestors = compute_dirty_ancestors(&statuses);
-    Some(Snapshot {
-        root: workdir,
-        statuses,
-        dirty_ancestors,
-    })
+    assemble_snapshot(repo, workdir, statuses)
 }
 
 fn scope_dir(target: &Path) -> PathBuf {
@@ -281,12 +382,60 @@ pub fn discover(start: &Path) -> Option<Snapshot> {
     let repo = gix::discover(start).ok()?;
     let workdir = normalize_existing(repo.workdir()?)?;
     let statuses = collect_statuses(&repo, Vec::new()).unwrap_or_default();
+    assemble_snapshot(repo, workdir, statuses)
+}
+
+fn assemble_snapshot(
+    repo: gix::Repository,
+    workdir: PathBuf,
+    statuses: HashMap<PathBuf, PorcelainCode>,
+) -> Option<Snapshot> {
+    // `index_or_empty` synthesises an empty index on a fresh `git init` (no
+    // index file on disk yet); we only get `Err` from a corrupt index file,
+    // in which case Snapshot construction has to fail — without a usable
+    // index there's no way to honour the CLEAN-requires-proof invariant.
+    let index = repo.index_or_empty().ok()?;
+    let excludes = repo
+        .excludes(
+            &index,
+            None,
+            gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+        )
+        .ok()?
+        .detach();
     let dirty_ancestors = compute_dirty_ancestors(&statuses);
+    let (tracked_prefixes, submodule_roots) = collect_index_prefixes(&index);
     Some(Snapshot {
         root: workdir,
         statuses,
         dirty_ancestors,
+        tracked_prefixes,
+        submodule_roots,
+        repo,
+        excludes: RefCell::new(excludes),
     })
+}
+
+fn collect_index_prefixes(index: &gix::index::File) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
+    let mut prefixes: HashSet<PathBuf> = HashSet::new();
+    let mut submodules: HashSet<PathBuf> = HashSet::new();
+    // The repo root itself counts as "has tracked content" so a directory
+    // row at the root doesn't fall through to UNTRACKED. The empty path is
+    // always present so the root row gets CLEAN treatment in an empty repo
+    // too.
+    prefixes.insert(PathBuf::new());
+    for entry in index.entries() {
+        let path = rela_to_pathbuf(entry.path(index));
+        if entry.mode.contains(gix::index::entry::Mode::COMMIT) {
+            submodules.insert(path.clone());
+        }
+        for ancestor in path.ancestors() {
+            if !prefixes.insert(ancestor.to_path_buf()) {
+                break;
+            }
+        }
+    }
+    (prefixes, submodules)
 }
 
 fn compute_dirty_ancestors(statuses: &HashMap<PathBuf, PorcelainCode>) -> HashSet<PathBuf> {
@@ -369,6 +518,7 @@ fn handle_index_worktree(
             out.insert(path, code);
         }
         gix::status::index_worktree::Item::Rewrite {
+            source,
             dirwalk_entry,
             copy,
             ..
@@ -377,6 +527,21 @@ fn handle_index_worktree(
             let code = rewrite_code(*copy);
             let prev = out.get(&path).copied();
             out.insert(path, merge(prev, code));
+            // A rename (not a copy) takes the source out of the worktree;
+            // the index still has the source path, so `tracked_prefixes`
+            // would otherwise claim CLEAN for a file that's gone. Mark the
+            // source as DELETED_WORKTREE explicitly. A copy keeps the
+            // source on disk, so there's nothing to record for it.
+            if !*copy
+                && let gix::status::index_worktree::RewriteSource::RewriteFromIndex {
+                    source_rela_path,
+                    ..
+                } = source
+            {
+                let source_path = rela_to_pathbuf(source_rela_path.as_ref());
+                let prev = out.get(&source_path).copied();
+                out.insert(source_path, merge(prev, PorcelainCode::DELETED_WORKTREE));
+            }
         }
     }
 }
@@ -421,7 +586,6 @@ fn merge(prev: Option<PorcelainCode>, next: PorcelainCode) -> PorcelainCode {
 )]
 mod tests {
     use super::{PorcelainCode, Snapshot, SnapshotCache, discover, merge};
-    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Mutex, MutexGuard};
@@ -481,6 +645,11 @@ mod tests {
                 std::fs::create_dir_all(parent).unwrap();
             }
             std::fs::write(p, content).unwrap();
+            self
+        }
+
+        fn create_dir(&self, rel: &str) -> &Self {
+            std::fs::create_dir_all(self.dir.path().join(rel)).unwrap();
             self
         }
 
@@ -561,41 +730,56 @@ mod tests {
     }
 
     #[test]
-    fn lookup_returns_clean_for_unknown_path() {
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses: HashMap::new(),
-            ..Default::default()
-        };
-        assert_eq!(snap.lookup(Path::new("/repo/file")), PorcelainCode::CLEAN);
-        assert_eq!(snap.lookup(Path::new("/elsewhere")), PorcelainCode::CLEAN);
+    fn lookup_returns_untracked_for_unknown_path_inside_root() {
+        // An empty repo with no entries: nothing is tracked, nothing has a
+        // status, nothing matches an ignore rule. A path INSIDE the repo
+        // root must resolve to UNTRACKED — never CLEAN.
+        let r = TestRepo::new();
+        assert_eq!(
+            r.snapshot().lookup(&r.root().join("ghost")),
+            PorcelainCode::UNTRACKED,
+        );
     }
 
     #[test]
-    fn lookup_returns_stored_code_for_known_relative_path() {
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("a"), PorcelainCode::UNTRACKED);
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses,
-            ..Default::default()
-        };
-        assert_eq!(snap.lookup(Path::new("/repo/a")), PorcelainCode::UNTRACKED);
+    fn lookup_returns_blank_for_path_outside_root() {
+        // Outside the snapshot's workdir, lookup has nothing to say — return
+        // BLANK so the git column stays empty (no spurious `?` glyph).
+        let r = TestRepo::new();
+        let sibling = tempfile::tempdir().unwrap();
+        assert_eq!(
+            r.snapshot().lookup(&sibling.path().join("elsewhere")),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn lookup_uses_status_walk_entry_for_known_path() {
+        // Stage a tracked-then-modified file: the status walk emits
+        // MODIFIED_WORKTREE, which is distinguishable from both the CLEAN
+        // outcome (would mean tracked-fine) and the UNTRACKED outcome
+        // (would mean the per-path classifier ran). So this test pins the
+        // statuses precedence — a regression that reorders statuses vs
+        // tracked_prefixes can no longer pass by accident.
+        let r = TestRepo::new();
+        r.write("a", b"one\n").commit(&["a"], "init");
+        r.write("a", b"two\n");
+        assert_eq!(
+            status_at(&r.snapshot(), "a"),
+            PorcelainCode::MODIFIED_WORKTREE,
+        );
     }
 
     #[test]
     fn is_ignored_only_true_for_ignored_code() {
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("ig"), PorcelainCode::IGNORED);
-        statuses.insert(PathBuf::from("un"), PorcelainCode::UNTRACKED);
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses,
-            ..Default::default()
-        };
-        assert!(snap.is_ignored(Path::new("/repo/ig")));
-        assert!(!snap.is_ignored(Path::new("/repo/un")));
-        assert!(!snap.is_ignored(Path::new("/repo/missing")));
+        let r = TestRepo::new();
+        r.write(".gitignore", b"ig\n")
+            .write("ig", b"x")
+            .write("un", b"x");
+        let snap = r.snapshot();
+        assert!(snap.is_ignored(&r.root().join("ig")));
+        assert!(!snap.is_ignored(&r.root().join("un")));
+        assert!(!snap.is_ignored(&r.root().join("missing")));
     }
 
     #[test]
@@ -762,110 +946,91 @@ mod tests {
 
     #[test]
     fn lookup_inherits_untracked_from_collapsed_directory() {
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("dir"), PorcelainCode::UNTRACKED);
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses,
-            ..Default::default()
-        };
+        // Whole-untracked subdirectories are emitted as one collapsed entry
+        // by gix; descendants inherit UNTRACKED via the ancestor walk.
+        let r = TestRepo::new();
+        r.write("dir/file", b"x").write("dir/deeper/file", b"x");
+        let snap = r.snapshot();
         assert_eq!(
-            snap.lookup(Path::new("/repo/dir/file")),
+            snap.lookup(&r.root().join("dir/file")),
             PorcelainCode::UNTRACKED,
         );
         assert_eq!(
-            snap.lookup(Path::new("/repo/dir/deeper/file")),
+            snap.lookup(&r.root().join("dir/deeper/file")),
             PorcelainCode::UNTRACKED,
         );
-        // A sibling outside the collapsed directory stays clean.
-        assert_eq!(snap.lookup(Path::new("/repo/other")), PorcelainCode::CLEAN,);
+        // A path outside the collapsed directory and not in the index falls
+        // through to UNTRACKED as well — never CLEAN.
+        assert_eq!(
+            snap.lookup(&r.root().join("other")),
+            PorcelainCode::UNTRACKED,
+        );
     }
 
     #[test]
-    fn lookup_inherits_ignored_but_not_other_statuses_from_ancestors() {
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("ig"), PorcelainCode::IGNORED);
-        statuses.insert(PathBuf::from("mod"), PorcelainCode::MODIFIED_WORKTREE);
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses,
-            ..Default::default()
-        };
+    fn lookup_inherits_ignored_from_ancestor() {
+        // A whole-ignored directory is emitted as one collapsed entry; a
+        // child path inherits IGNORED via the ancestor walk.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"ig/\n").write("ig/inside", b"x");
+        let snap = r.snapshot();
         assert_eq!(
-            snap.lookup(Path::new("/repo/ig/inside")),
+            snap.lookup(&r.root().join("ig/inside")),
             PorcelainCode::IGNORED,
         );
-        // A child of a Modified file (nonsense for regular files but possible
-        // for type-change cases) shouldn't inherit Modified.
-        assert_eq!(
-            snap.lookup(Path::new("/repo/mod/inside")),
-            PorcelainCode::CLEAN,
-        );
     }
 
     #[test]
-    fn lookup_handles_relative_target_against_absolute_root() {
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("a.txt"), PorcelainCode::UNTRACKED);
-        let snap = Snapshot {
-            root: std::env::current_dir().unwrap(),
-            statuses,
-            ..Default::default()
-        };
-        // A relative path that absolutises against the current dir into the
-        // workdir should still match its status.
-        assert_eq!(snap.lookup(Path::new("a.txt")), PorcelainCode::UNTRACKED);
-        assert_eq!(snap.lookup(Path::new("./a.txt")), PorcelainCode::UNTRACKED);
+    fn lookup_does_not_inherit_modified_from_ancestor() {
+        // A modified file's status must not bleed onto something that looks
+        // like its child (nonsense for regular files; possible for
+        // type-change cases).
+        let r = TestRepo::new();
+        r.write("mod", b"orig\n").commit(&["mod"], "init");
+        r.write("mod", b"changed\n");
+        let snap = r.snapshot();
+        // `mod/inside` doesn't exist; the MODIFIED status of `mod` must
+        // not be inherited by phantom descendants.
+        assert_ne!(
+            snap.lookup(&r.root().join("mod/inside")),
+            PorcelainCode::MODIFIED_WORKTREE,
+        );
     }
 
     #[test]
     fn lookup_resolves_dotdot_via_canonicalize_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(dir.path()).unwrap();
-        std::fs::write(canonical.join("file"), b"x").unwrap();
-        std::fs::create_dir(canonical.join("sub")).unwrap();
-
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("file"), PorcelainCode::UNTRACKED);
-        let snap = Snapshot {
-            root: canonical.clone(),
-            statuses,
-            ..Default::default()
-        };
-        // The lexical strip succeeds but yields `sub/../file`; the canonicalize
-        // fallback simplifies that to `file` so the lookup matches.
-        let weird = canonical.join("sub").join("..").join("file");
-        assert_eq!(snap.lookup(&weird), PorcelainCode::UNTRACKED);
+        // The lexical strip yields `sub/../file`; the canonicalize fallback
+        // simplifies that to `file` so the lookup matches.
+        let r = TestRepo::new();
+        r.write("file", b"x").create_dir("sub");
+        let canonical_root = std::fs::canonicalize(r.root()).unwrap();
+        let weird = canonical_root.join("sub").join("..").join("file");
+        assert_eq!(r.snapshot().lookup(&weird), PorcelainCode::UNTRACKED);
     }
 
     #[test]
-    fn lookup_returns_clean_when_canonicalize_lands_outside_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(dir.path()).unwrap();
-        std::fs::write(canonical.join("file"), b"x").unwrap();
-
-        let snap = Snapshot {
-            root: canonical.join("nonexistent_root"),
-            statuses: HashMap::new(),
-            ..Default::default()
-        };
-        // canonicalize succeeds but lands outside `root`, so the second
-        // strip_prefix returns Err and `relativize` yields None.
-        assert_eq!(snap.lookup(&canonical.join("file")), PorcelainCode::CLEAN,);
-    }
-
-    #[test]
-    fn lookup_returns_clean_when_canonicalize_fails() {
-        // A path containing `..` that doesn't resolve to a real filesystem
-        // entry forces the canonicalize fallback to fail.
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses: HashMap::new(),
-            ..Default::default()
-        };
+    fn lookup_returns_blank_when_canonicalize_lands_outside_root() {
+        // A real path that lands outside the snapshot's workdir: `relativize`
+        // yields None → lookup returns BLANK so the row renders no glyph.
+        let r = TestRepo::new();
+        let snap = r.snapshot();
+        let sibling = tempfile::tempdir().unwrap();
+        std::fs::write(sibling.path().join("file"), b"x").unwrap();
         assert_eq!(
-            snap.lookup(Path::new("/repo/missing/../also-missing")),
-            PorcelainCode::CLEAN,
+            snap.lookup(&sibling.path().join("file")),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn lookup_returns_blank_when_canonicalize_fails() {
+        // A `..` path with no real on-disk components forces both lexical
+        // strip and canonicalize to fail → relativize yields None → BLANK.
+        let r = TestRepo::new();
+        assert_eq!(
+            r.snapshot()
+                .lookup(&r.root().join("missing/../also-missing")),
+            PorcelainCode::BLANK,
         );
     }
 
@@ -873,33 +1038,30 @@ mod tests {
     fn lookup_preserves_leaf_symlink_via_parent_canonicalisation() {
         // The canonicalize fallback must NOT dereference a leaf symlink — if
         // it did, a symlinked entry would look up under its target's path
-        // instead of its own. Build a workdir reached through a directory
-        // symlink and confirm `lookup` resolves the leaf via the symlink's
-        // own name.
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(dir.path()).unwrap();
-        std::os::unix::fs::symlink("/dev/null", canonical.join("entry")).unwrap();
+        // instead of its own. Set up a TYPE_CHANGE_WORKTREE for `entry` (a
+        // committed regular file replaced by a symlink) so the test has a
+        // discriminating status code: following the symlink to `/dev/null`
+        // would yield a different lookup result entirely (BLANK, since
+        // `/dev/null` is outside the snapshot root), so any future
+        // regression that follows the leaf symlink will fail loudly.
+        let r = TestRepo::new();
+        r.write("entry", b"originally a file")
+            .commit(&["entry"], "init");
+        r.remove_file("entry").symlink("/dev/null", "entry");
+        let canonical = std::fs::canonicalize(r.root()).unwrap();
         // Put the directory symlink in a separate tempdir so its path can't
-        // share a prefix with `canonical`. Otherwise on platforms where the
-        // tempdir is already its own canonical path (Linux), the lexical
-        // strip_prefix would succeed and yield `via_link/entry`, bypassing
-        // the parent-canonicalisation fallback this test exists to cover.
+        // share a prefix with `canonical`. On platforms where the tempdir
+        // is already canonical (Linux), the lexical strip_prefix would
+        // otherwise succeed and yield `via_link/entry`, bypassing the
+        // parent-canonicalisation fallback this test exists to cover.
         let link_parent = tempfile::tempdir().unwrap();
         let link_dir = link_parent.path().join("via_link");
         std::os::unix::fs::symlink(&canonical, &link_dir).unwrap();
 
-        let mut statuses = HashMap::new();
-        statuses.insert(PathBuf::from("entry"), PorcelainCode::TYPE_CHANGE_WORKTREE);
-        let snap = Snapshot {
-            root: canonical,
-            statuses,
-            ..Default::default()
-        };
-        // Path is reached via the directory symlink; lexical strip_prefix
-        // fails because link_dir's path differs from the canonical root.
-        // The parent-canonicalisation fallback must resolve `via_link` to
-        // the real workdir AND preserve the `entry` leaf without following
-        // its symlink to `/dev/null`.
+        let snap = r.snapshot();
+        // Reaching `entry` via the directory-symlink path must resolve to
+        // TYPE_CHANGE_WORKTREE — the status of the symlink itself, not the
+        // status of `/dev/null`.
         assert_eq!(
             snap.lookup(&link_dir.join("entry")),
             PorcelainCode::TYPE_CHANGE_WORKTREE,
@@ -908,45 +1070,31 @@ mod tests {
 
     #[test]
     fn lookup_handles_single_component_relative_path() {
-        // `Path::new("file").parent()` is `Some("")`; the fallback must
+        // `Path::new("solo").parent()` is `Some("")`; the fallback must
         // substitute "." so canonicalize doesn't choke on the empty path.
-        // Use a root that doesn't include cwd so the lexical branch fails
-        // and the parent-canonicalisation fallback fires; the test then
-        // just confirms `relativize` does not panic and returns CLEAN.
-        let snap = Snapshot {
-            root: PathBuf::from("/definitely/not/the/cwd"),
-            statuses: HashMap::new(),
-            ..Default::default()
-        };
-        assert_eq!(snap.lookup(Path::new("solo")), PorcelainCode::CLEAN);
+        // CWD during tests is the package root, not under the tempdir, so
+        // the path can't be relativized → outside-root → BLANK.
+        let r = TestRepo::new();
+        assert_eq!(r.snapshot().lookup(Path::new("solo")), PorcelainCode::BLANK);
     }
 
     #[test]
     fn lookup_handles_path_with_no_file_name() {
-        // `Path::new("/").file_name()` is `None`. The fallback must
-        // canonicalise the whole path rather than panic via `?`.
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(dir.path()).unwrap();
-        let snap = Snapshot {
-            root: canonical,
-            statuses: HashMap::new(),
-            ..Default::default()
-        };
-        // A bare `..` has no file_name; lookup must not panic and must
-        // return CLEAN (the parent dir of the tempdir is outside the root).
-        assert_eq!(snap.lookup(Path::new("..")), PorcelainCode::CLEAN,);
+        // `Path::new("..").file_name()` is `None`. The fallback must
+        // canonicalise the whole path rather than panic via `?`. The parent
+        // of the tempdir is outside the root → BLANK.
+        let r = TestRepo::new();
+        assert_eq!(r.snapshot().lookup(Path::new("..")), PorcelainCode::BLANK);
     }
 
     #[test]
-    fn lookup_returns_clean_when_outside_root() {
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            statuses: HashMap::new(),
-            ..Default::default()
-        };
+    fn lookup_returns_blank_for_path_in_unrelated_tempdir() {
+        let r = TestRepo::new();
+        let snap = r.snapshot();
+        let sibling = tempfile::tempdir().unwrap();
         assert_eq!(
-            snap.lookup(Path::new("/elsewhere/file")),
-            PorcelainCode::CLEAN,
+            snap.lookup(&sibling.path().join("file")),
+            PorcelainCode::BLANK,
         );
     }
 
@@ -1119,22 +1267,23 @@ mod tests {
 
     #[test]
     fn has_dirty_descendants_false_outside_root() {
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            ..Default::default()
-        };
-        assert!(!snap.has_dirty_descendants(Path::new("/elsewhere/dir")));
+        let r = TestRepo::new();
+        let snap = r.snapshot();
+        let sibling = tempfile::tempdir().unwrap();
+        assert!(!snap.has_dirty_descendants(&sibling.path().join("dir")));
     }
 
     #[test]
-    fn display_code_for_returns_clean_outside_root() {
-        let snap = Snapshot {
-            root: PathBuf::from("/repo"),
-            ..Default::default()
-        };
+    fn display_code_for_returns_blank_outside_root() {
+        // Outside-root paths can't be relativized; display_code_for matches
+        // lookup's BLANK contract so the git column for a cross-repo
+        // argument stays empty rather than rendering a misleading `?`.
+        let r = TestRepo::new();
+        let snap = r.snapshot();
+        let sibling = tempfile::tempdir().unwrap();
         assert_eq!(
-            snap.display_code_for(Path::new("/elsewhere/dir"), true),
-            PorcelainCode::CLEAN,
+            snap.display_code_for(&sibling.path().join("dir"), true),
+            PorcelainCode::BLANK,
         );
     }
 
@@ -1150,5 +1299,228 @@ mod tests {
             snap.display_code_for(r.root(), true),
             PorcelainCode::DIRTY_SUBTREE,
         );
+    }
+
+    // ---------- Regression tests for the CLEAN-requires-proof invariant ----
+
+    #[test]
+    fn lookup_marks_ignored_dir_when_scope_is_subdir() {
+        // The original bug: listing `backend/` (a subdir of the repo) walked
+        // status with pathspec `["backend"]`, and gix didn't emit
+        // `backend/node_modules/` as IGNORED at the pathspec boundary. The
+        // fix consults the exclude stack per-path instead of relying solely
+        // on the walk's emissions.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"node_modules/\n")
+            .write("backend/tracked", b"x")
+            .commit(&["."], "init");
+        r.write("backend/node_modules/anything", b"x");
+        let mut cache = SnapshotCache::new();
+        let snap = cache
+            .for_target(&r.root().join("backend"))
+            .expect("repo present");
+        assert_eq!(
+            snap.display_code_for(&r.root().join("backend/node_modules"), true),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn lookup_marks_untracked_dir_when_scope_is_subdir() {
+        // Symmetric regression: a brand-new directory under a subdir scope
+        // must resolve to UNTRACKED, not CLEAN.
+        let r = TestRepo::new();
+        r.write("backend/tracked", b"x").commit(&["."], "init");
+        r.write("backend/brand_new/anything", b"x");
+        let mut cache = SnapshotCache::new();
+        let snap = cache
+            .for_target(&r.root().join("backend"))
+            .expect("repo present");
+        assert_eq!(
+            snap.display_code_for(&r.root().join("backend/brand_new"), true),
+            PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn lookup_marks_clean_only_when_path_in_index() {
+        // CLEAN requires positive proof of being in the index. "No change
+        // reported" and "exists on disk" don't qualify.
+        let r = TestRepo::new();
+        r.write("backend/tracked", b"x").commit(&["."], "init");
+        let mut cache = SnapshotCache::new();
+        let snap = cache
+            .for_target(&r.root().join("backend"))
+            .expect("repo present");
+        assert_eq!(
+            snap.lookup(&r.root().join("backend/tracked")),
+            PorcelainCode::CLEAN,
+        );
+        // A path that's not in the index and has no exclude rule must NOT
+        // be CLEAN.
+        assert_ne!(
+            snap.lookup(&r.root().join("backend/never_existed")),
+            PorcelainCode::CLEAN,
+        );
+    }
+
+    #[test]
+    fn lookup_marks_brand_new_file_untracked_not_clean() {
+        // The core invariant: a brand-new file with no statuses entry and
+        // no exclude rule match resolves to UNTRACKED.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.write("brand_new", b"x");
+        assert_eq!(
+            status_at(&r.snapshot(), "brand_new"),
+            PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn lookup_consults_exclude_stack_for_file_outside_walk_scope() {
+        // FILE-mode exclude check: the path must exist on disk (so
+        // `lookup`'s `stat` gives `is_directory=Some(false)`), live outside
+        // the snapshot's pathspec scope (so it isn't in `statuses`), and
+        // not be tracked (so `tracked_prefixes` doesn't catch it). Then
+        // `path_is_excluded` runs with `Mode::FILE` and the exclude rule
+        // decides the verdict.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"*.log\n")
+            .write("a/tracked", b"x")
+            .commit(&["."], "init");
+        r.write("b/foo.log", b"x");
+        let mut cache = SnapshotCache::new();
+        let snap = cache.for_target(&r.root().join("a")).expect("repo present");
+        assert_eq!(
+            snap.lookup(&r.root().join("b/foo.log")),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn snapshot_debug_emits_non_empty_repr() {
+        // The Debug impl is hand-rolled because `gix::worktree::Stack`
+        // doesn't impl Debug; this test makes sure it actually compiles
+        // and produces a recognisable string for diagnostic output.
+        let r = TestRepo::new();
+        let snap = r.snapshot();
+        let repr = format!("{snap:?}");
+        assert!(repr.contains("Snapshot"));
+        assert!(repr.contains("tracked_prefixes_len"));
+    }
+
+    #[test]
+    fn worktree_rename_marks_source_deleted_not_clean() {
+        // `mv from to` after committing `from` triggers a single gix
+        // Item::Rewrite. The Rewrite arm must record the source as
+        // DELETED_WORKTREE — otherwise the source path stays in
+        // `tracked_prefixes` (still in the index) and `lookup` would
+        // claim CLEAN for a file that no longer exists.
+        let r = TestRepo::new();
+        // 40 lines so gix's rewrite detector clears its default 50%
+        // similarity threshold.
+        let body = "line\n".repeat(40);
+        r.write("from", body.as_bytes()).commit(&["from"], "from");
+        r.rename("from", "to");
+        assert_eq!(
+            status_at(&r.snapshot(), "from"),
+            PorcelainCode::DELETED_WORKTREE,
+        );
+    }
+
+    #[test]
+    fn submodule_contents_resolve_to_clean() {
+        // The parent repo only tracks the submodule's gitlink commit, not
+        // its contents — but those contents shouldn't render as `?`. With
+        // a gitlink in submodule_roots, lookup under the submodule path
+        // returns CLEAN (we delegate that subtree to the submodule).
+        let r = TestRepo::new();
+        // Set up a real inner repo to register as a submodule.
+        let inner = tempfile::tempdir().unwrap();
+        run_git(inner.path(), &["init", "-q", "-b", "main"]);
+        run_git(inner.path(), &["config", "user.email", "t@example.invalid"]);
+        run_git(inner.path(), &["config", "user.name", "t"]);
+        std::fs::write(inner.path().join("inside"), b"x").unwrap();
+        run_git(inner.path(), &["add", "inside"]);
+        run_git(inner.path(), &["commit", "-q", "-m", "inner"]);
+        // `git submodule add` from a local path; the protocol restriction
+        // env var lets file:// urls through in modern git.
+        let inner_url = format!("file://{}", inner.path().display());
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(r.root())
+            .args(["-c", "protocol.file.allow=always"])
+            .args(["submodule", "add", "-q", &inner_url, "submod"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("HOME", r.root())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git submodule add failed");
+        r.commit(&["."], "add submod");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.lookup(&r.root().join("submod/inside")),
+            PorcelainCode::CLEAN,
+        );
+    }
+
+    #[test]
+    fn symlink_to_directory_matching_dir_rule_is_not_ignored() {
+        // `man gitignore`: "Symbolic links to directories are not considered
+        // directories for the purpose of matching." After the fix,
+        // `lookup` uses lstat (so is_dir=false for the symlink itself) and
+        // a trailing-slash rule fails to match.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"vendor/\n")
+            .commit(&[".gitignore"], "ig");
+        // Symlink target need not exist on disk — gix only consults
+        // the link's own kind, not the target.
+        r.symlink("/tmp", "vendor");
+        let snap = r.snapshot();
+        assert_ne!(
+            snap.lookup(&r.root().join("vendor")),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn lookup_returns_untracked_when_exclude_stack_at_path_errors() {
+        // The exclude stack walks ancestors to push directories. If an
+        // ancestor exists as a regular file (not a directory), `at_path`
+        // returns an I/O error; `path_is_excluded` swallows it and the
+        // lookup falls through to UNTRACKED. Triggering this via a file
+        // posing as a parent works regardless of uid (chmod 0o000 doesn't,
+        // since root bypasses POSIX read permissions).
+        let r = TestRepo::new();
+        // `parent` is a regular file; treating "parent/child" as a path
+        // forces at_path to fail when it tries to enter `parent` as a dir.
+        r.write("parent", b"i'm a file");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.lookup(&r.root().join("parent/child")),
+            PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn discover_returns_none_for_corrupt_index() {
+        // `assemble_snapshot` propagates an `index_or_empty` failure as
+        // `None` — a corrupt repo can't satisfy the lookup invariant
+        // (we can't tell what's tracked) so refusing to build a snapshot
+        // is the right behaviour. The corruption here is a valid header
+        // signature with an unsupported version number, which gix rejects
+        // cleanly instead of panicking on truncated data.
+        let r = TestRepo::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DIRC"); // signature
+        bytes.extend_from_slice(&0x99_u32.to_be_bytes()); // unsupported version
+        bytes.extend_from_slice(&0_u32.to_be_bytes()); // entry count
+        // Pad with the trailing SHA-1 (20 zero bytes) so the truncation
+        // check doesn't trigger before the version check.
+        bytes.extend_from_slice(&[0u8; 20]);
+        std::fs::write(r.root().join(".git/index"), &bytes).unwrap();
+        assert!(discover(r.root()).is_none());
     }
 }

@@ -377,12 +377,26 @@ fn should_descend(entry: &Entry, snapshot: Option<&Snapshot>, options: ListOptio
     if is_hidden && options.unrestricted < 2 {
         return false;
     }
+    // Pass `is_real_dir(entry)`, not a hard `true` — a symlink-to-directory
+    // (which `collect` reclassifies as kind=Directory) is a *file* from
+    // git's perspective, so trailing-slash exclude rules like `vendor/`
+    // must not match it.
     if options.unrestricted < 1
-        && snapshot.is_some_and(|s| s.lookup(&entry.path) == PorcelainCode::IGNORED)
+        && snapshot.is_some_and(|s| {
+            s.display_code_for(&entry.path, is_real_dir(entry)) == PorcelainCode::IGNORED
+        })
     {
         return false;
     }
     true
+}
+
+/// `true` only for a real directory inode — symlinks-to-directories are
+/// reclassified as `Directory` by `entry_for_path`, but git treats them as
+/// files for ignore matching (see gitignore(5): "Symbolic links to
+/// directories are not considered directories for the purpose of matching").
+fn is_real_dir(entry: &Entry) -> bool {
+    entry.kind == EntryKind::Directory && entry.symlink_target.is_none()
 }
 
 fn render_entries(
@@ -435,8 +449,7 @@ fn render_files(
 }
 
 fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<&Snapshot>) {
-    let code =
-        snapshot.map(|s| s.display_code_for(&entry.path, entry.kind == EntryKind::Directory));
+    let code = snapshot.map(|s| s.display_code_for(&entry.path, is_real_dir(entry)));
     if let Some(c) = code {
         row.git = Some(format::git_col::render(c));
     }

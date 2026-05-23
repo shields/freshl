@@ -415,6 +415,10 @@ fn merge(prev: Option<PorcelainCode>, next: PorcelainCode) -> PorcelainCode {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "TestRepo intentionally holds GIT_LOCK and TempDir for the entire test scope so parallel git subprocesses can't share index state via environment"
+)]
 mod tests {
     use super::{PorcelainCode, Snapshot, SnapshotCache, discover, merge};
     use std::collections::HashMap;
@@ -440,20 +444,77 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
-    fn fresh_repo() -> (MutexGuard<'static, ()>, TempDir) {
-        let guard = GIT_LOCK.lock().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        run_git(dir.path(), &["init", "-q", "-b", "main"]);
-        run_git(
-            dir.path(),
-            &["config", "user.email", "test@example.invalid"],
-        );
-        run_git(dir.path(), &["config", "user.name", "Test"]);
-        (guard, dir)
+    /// Fluent test fixture: a freshly-initialised git repo in a tempdir,
+    /// holding `GIT_LOCK` for its lifetime so concurrent tests don't
+    /// interleave git subprocesses or share index state via env vars.
+    ///
+    /// Methods return `&Self` so common setup reads like a builder:
+    ///   `r.write("a", b"x").commit(&["a"], "msg").write("a", b"y");`
+    struct TestRepo {
+        _lock: MutexGuard<'static, ()>,
+        dir: TempDir,
     }
 
-    fn snapshot_for(dir: &Path) -> Snapshot {
-        discover(dir).expect("repo present")
+    impl TestRepo {
+        fn new() -> Self {
+            // `unwrap_or_else(into_inner)` keeps a failing test from
+            // cascading into ~40 PoisonError failures and masking the real
+            // root cause. The lock's job is serialisation; a previous panic
+            // doesn't make later acquisitions unsafe.
+            let lock = GIT_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dir = tempfile::tempdir().unwrap();
+            run_git(dir.path(), &["init", "-q", "-b", "main"]);
+            run_git(dir.path(), &["config", "user.email", "t@example.invalid"]);
+            run_git(dir.path(), &["config", "user.name", "t"]);
+            Self { _lock: lock, dir }
+        }
+
+        fn root(&self) -> &Path {
+            self.dir.path()
+        }
+
+        fn write(&self, rel: &str, content: &[u8]) -> &Self {
+            let p = self.dir.path().join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(p, content).unwrap();
+            self
+        }
+
+        fn remove_file(&self, rel: &str) -> &Self {
+            std::fs::remove_file(self.dir.path().join(rel)).unwrap();
+            self
+        }
+
+        fn rename(&self, from: &str, to: &str) -> &Self {
+            std::fs::rename(self.dir.path().join(from), self.dir.path().join(to)).unwrap();
+            self
+        }
+
+        fn symlink(&self, target: impl AsRef<Path>, rel: &str) -> &Self {
+            std::os::unix::fs::symlink(target, self.dir.path().join(rel)).unwrap();
+            self
+        }
+
+        fn git(&self, args: &[&str]) -> &Self {
+            run_git(self.dir.path(), args);
+            self
+        }
+
+        /// `git add <add_args>` followed by `git commit -m <msg>`. Pass
+        /// `&["."]` to stage everything.
+        fn commit(&self, add_args: &[&str], msg: &str) -> &Self {
+            let mut add: Vec<&str> = vec!["add"];
+            add.extend_from_slice(add_args);
+            self.git(&add).git(&["commit", "-q", "-m", msg])
+        }
+
+        fn snapshot(&self) -> Snapshot {
+            discover(self.dir.path()).expect("repo present")
+        }
     }
 
     fn status_at(snap: &Snapshot, rel: &str) -> PorcelainCode {
@@ -555,142 +616,121 @@ mod tests {
 
     #[test]
     fn discover_reports_untracked_file() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("new"), b"x").unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "new"), PorcelainCode::UNTRACKED);
+        let r = TestRepo::new();
+        r.write("new", b"x");
+        assert_eq!(status_at(&r.snapshot(), "new"), PorcelainCode::UNTRACKED);
     }
 
     #[test]
     fn discover_reports_ignored_file() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join(".gitignore"), b"hidden\n").unwrap();
-        std::fs::write(dir.path().join("hidden"), b"x").unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "hidden"), PorcelainCode::IGNORED);
+        let r = TestRepo::new();
+        r.write(".gitignore", b"hidden\n").write("hidden", b"x");
+        assert_eq!(status_at(&r.snapshot(), "hidden"), PorcelainCode::IGNORED);
     }
 
     #[test]
     fn discover_reports_modified_worktree() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("a"), b"hello\n").unwrap();
-        run_git(dir.path(), &["add", "a"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "x"]);
-        std::fs::write(dir.path().join("a"), b"different\n").unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "a"), PorcelainCode::MODIFIED_WORKTREE);
+        let r = TestRepo::new();
+        r.write("a", b"hello\n").commit(&["a"], "x");
+        r.write("a", b"different\n");
+        assert_eq!(
+            status_at(&r.snapshot(), "a"),
+            PorcelainCode::MODIFIED_WORKTREE,
+        );
     }
 
     #[test]
     fn discover_reports_deleted_worktree() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("b"), b"x").unwrap();
-        run_git(dir.path(), &["add", "b"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "x"]);
-        std::fs::remove_file(dir.path().join("b")).unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "b"), PorcelainCode::DELETED_WORKTREE);
+        let r = TestRepo::new();
+        r.write("b", b"x").commit(&["b"], "x").remove_file("b");
+        assert_eq!(
+            status_at(&r.snapshot(), "b"),
+            PorcelainCode::DELETED_WORKTREE,
+        );
     }
 
     #[test]
     fn discover_reports_staged_addition() {
-        let (_g, dir) = fresh_repo();
         // The tree-vs-index diff needs at least one commit on HEAD to compare against.
-        std::fs::write(dir.path().join("seed"), b"x").unwrap();
-        run_git(dir.path(), &["add", "seed"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "seed"]);
-        std::fs::write(dir.path().join("staged"), b"hi").unwrap();
-        run_git(dir.path(), &["add", "staged"]);
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "staged").index, '+');
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["seed"], "seed");
+        r.write("staged", b"hi").git(&["add", "staged"]);
+        assert_eq!(status_at(&r.snapshot(), "staged").index, '+');
     }
 
     #[test]
     fn discover_reports_staged_modification() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("m"), b"one\n").unwrap();
-        run_git(dir.path(), &["add", "m"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "m"]);
-        std::fs::write(dir.path().join("m"), b"two\n").unwrap();
-        run_git(dir.path(), &["add", "m"]);
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "m").index, '●');
+        let r = TestRepo::new();
+        r.write("m", b"one\n").commit(&["m"], "m");
+        r.write("m", b"two\n").git(&["add", "m"]);
+        assert_eq!(status_at(&r.snapshot(), "m").index, '●');
     }
 
     #[test]
     fn discover_reports_staged_deletion() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("d"), b"x").unwrap();
-        run_git(dir.path(), &["add", "d"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "d"]);
-        run_git(dir.path(), &["rm", "-q", "d"]);
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "d").index, '▽');
+        let r = TestRepo::new();
+        r.write("d", b"x")
+            .commit(&["d"], "d")
+            .git(&["rm", "-q", "d"]);
+        assert_eq!(status_at(&r.snapshot(), "d").index, '▽');
     }
 
     #[test]
     fn discover_reports_rename_in_worktree() {
-        let (_g, dir) = fresh_repo();
         // 40 lines so the similarity threshold inside gix's rewrite detector
         // is comfortably above the default 50% — otherwise the rename is
         // reported as an add+delete pair.
+        let r = TestRepo::new();
         let body = "line\n".repeat(40);
-        std::fs::write(dir.path().join("from"), &body).unwrap();
-        run_git(dir.path(), &["add", "from"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "from"]);
-        std::fs::rename(dir.path().join("from"), dir.path().join("to")).unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "to"), PorcelainCode::RENAMED_WORKTREE);
+        r.write("from", body.as_bytes()).commit(&["from"], "from");
+        r.rename("from", "to");
+        assert_eq!(
+            status_at(&r.snapshot(), "to"),
+            PorcelainCode::RENAMED_WORKTREE,
+        );
     }
 
     #[test]
     fn discover_reports_staged_rename() {
-        let (_g, dir) = fresh_repo();
+        let r = TestRepo::new();
         let body = "line\n".repeat(40);
-        std::fs::write(dir.path().join("from"), &body).unwrap();
-        run_git(dir.path(), &["add", "from"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "from"]);
-        run_git(dir.path(), &["mv", "from", "to"]);
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "to").index, '→');
+        r.write("from", body.as_bytes()).commit(&["from"], "from");
+        r.git(&["mv", "from", "to"]);
+        assert_eq!(status_at(&r.snapshot(), "to").index, '→');
     }
 
     #[test]
     fn discover_reports_unmerged_conflict() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("c"), b"base\n").unwrap();
-        run_git(dir.path(), &["add", "c"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "base"]);
-        run_git(dir.path(), &["checkout", "-q", "-b", "other"]);
-        std::fs::write(dir.path().join("c"), b"other\n").unwrap();
-        run_git(dir.path(), &["commit", "-q", "-am", "other"]);
-        run_git(dir.path(), &["checkout", "-q", "main"]);
-        std::fs::write(dir.path().join("c"), b"main\n").unwrap();
-        run_git(dir.path(), &["commit", "-q", "-am", "main"]);
+        let r = TestRepo::new();
+        r.write("c", b"base\n").commit(&["c"], "base");
+        r.git(&["checkout", "-q", "-b", "other"]);
+        r.write("c", b"other\n")
+            .git(&["commit", "-q", "-am", "other"]);
+        r.git(&["checkout", "-q", "main"]);
+        r.write("c", b"main\n")
+            .git(&["commit", "-q", "-am", "main"]);
         // git merge exits non-zero on conflict; ignore its status.
         let _ = Command::new("git")
             .arg("-C")
-            .arg(dir.path())
+            .arg(r.root())
             .args(["merge", "--no-edit", "-q", "other"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("HOME", dir.path())
+            .env("HOME", r.root())
             .status()
             .unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "c"), PorcelainCode::UNMERGED);
+        assert_eq!(status_at(&r.snapshot(), "c"), PorcelainCode::UNMERGED);
     }
 
     #[test]
     fn discover_reports_type_change() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("t"), b"file").unwrap();
-        run_git(dir.path(), &["add", "t"]);
-        run_git(dir.path(), &["commit", "-q", "-m", "t"]);
-        std::fs::remove_file(dir.path().join("t")).unwrap();
-        std::os::unix::fs::symlink("anything", dir.path().join("t")).unwrap();
-        let snap = snapshot_for(dir.path());
-        assert_eq!(status_at(&snap, "t"), PorcelainCode::TYPE_CHANGE_WORKTREE);
+        let r = TestRepo::new();
+        r.write("t", b"file").commit(&["t"], "t").remove_file("t");
+        r.symlink("anything", "t");
+        assert_eq!(
+            status_at(&r.snapshot(), "t"),
+            PorcelainCode::TYPE_CHANGE_WORKTREE,
+        );
     }
 
     #[test]
@@ -912,41 +952,35 @@ mod tests {
 
     #[test]
     fn snapshot_cache_reuses_entry_for_same_target() {
-        let (_g, dir) = fresh_repo();
+        let r = TestRepo::new();
         let mut cache = SnapshotCache::new();
-        let first_ptr: *const Snapshot = cache.for_target(dir.path()).unwrap();
-        let second_ptr: *const Snapshot = cache.for_target(dir.path()).unwrap();
+        let first_ptr: *const Snapshot = cache.for_target(r.root()).unwrap();
+        let second_ptr: *const Snapshot = cache.for_target(r.root()).unwrap();
         assert!(std::ptr::eq(first_ptr, second_ptr));
     }
 
     #[test]
     fn snapshot_cache_walks_each_scope_independently() {
-        let (_g, dir) = fresh_repo();
         // Make `a/` have tracked-clean content plus one untracked file, and
         // `b/` similar but distinguishable — that way the pathspec walks
         // actually have to descend (collapsed mode would otherwise emit the
         // whole subdir as a single untracked entry).
-        let sub_a = dir.path().join("a");
-        let sub_b = dir.path().join("b");
-        std::fs::create_dir(&sub_a).unwrap();
-        std::fs::create_dir(&sub_b).unwrap();
-        std::fs::write(sub_a.join("tracked"), b"x").unwrap();
-        std::fs::write(sub_b.join("tracked"), b"x").unwrap();
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-        std::fs::write(sub_a.join("only_a"), b"x").unwrap();
-        std::fs::write(sub_b.join("only_b"), b"x").unwrap();
+        let r = TestRepo::new();
+        r.write("a/tracked", b"x")
+            .write("b/tracked", b"x")
+            .commit(&["."], "init");
+        r.write("a/only_a", b"x").write("b/only_b", b"x");
 
         let mut cache = SnapshotCache::new();
         let in_a: Vec<_> = cache
-            .for_target(&sub_a)
+            .for_target(&r.root().join("a"))
             .unwrap()
             .statuses
             .keys()
             .cloned()
             .collect();
         let in_b: Vec<_> = cache
-            .for_target(&sub_b)
+            .for_target(&r.root().join("b"))
             .unwrap()
             .statuses
             .keys()
@@ -1041,59 +1075,46 @@ mod tests {
 
     #[test]
     fn dirty_ancestors_includes_parents_of_modified_file() {
-        let (_g, dir) = fresh_repo();
-        let nested = dir.path().join("a/b/c");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("file"), b"orig\n").unwrap();
-        std::fs::create_dir(dir.path().join("sibling")).unwrap();
-        std::fs::write(dir.path().join("sibling/other"), b"x").unwrap();
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-        std::fs::write(nested.join("file"), b"modified\n").unwrap();
-        let snap = snapshot_for(dir.path());
-        assert!(snap.has_dirty_descendants(&dir.path().join("a")));
-        assert!(snap.has_dirty_descendants(&dir.path().join("a/b")));
-        assert!(snap.has_dirty_descendants(&dir.path().join("a/b/c")));
-        assert!(!snap.has_dirty_descendants(&dir.path().join("sibling")));
+        let r = TestRepo::new();
+        r.write("a/b/c/file", b"orig\n")
+            .write("sibling/other", b"x")
+            .commit(&["."], "init");
+        r.write("a/b/c/file", b"modified\n");
+        let snap = r.snapshot();
+        assert!(snap.has_dirty_descendants(&r.root().join("a")));
+        assert!(snap.has_dirty_descendants(&r.root().join("a/b")));
+        assert!(snap.has_dirty_descendants(&r.root().join("a/b/c")));
+        assert!(!snap.has_dirty_descendants(&r.root().join("sibling")));
     }
 
     #[test]
     fn dirty_ancestors_excludes_ignored_descendants() {
-        let (_g, dir) = fresh_repo();
-        let sub = dir.path().join("dir");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("tracked"), b"x").unwrap();
-        std::fs::write(dir.path().join(".gitignore"), b"dir/hidden\n").unwrap();
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-        std::fs::write(sub.join("hidden"), b"x").unwrap();
-        let snap = snapshot_for(dir.path());
+        let r = TestRepo::new();
+        r.write("dir/tracked", b"x")
+            .write(".gitignore", b"dir/hidden\n")
+            .commit(&["."], "init");
+        r.write("dir/hidden", b"x");
+        let snap = r.snapshot();
         // `dir/hidden` is IGNORED; its ancestor `dir` must not be flagged.
-        assert!(!snap.has_dirty_descendants(&sub));
+        assert!(!snap.has_dirty_descendants(&r.root().join("dir")));
     }
 
     #[test]
     fn dirty_ancestors_includes_untracked_in_tracked_dir() {
-        let (_g, dir) = fresh_repo();
-        let sub = dir.path().join("dir");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("tracked"), b"x").unwrap();
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-        std::fs::write(sub.join("new"), b"x").unwrap();
-        let snap = snapshot_for(dir.path());
-        assert!(snap.has_dirty_descendants(&sub));
+        let r = TestRepo::new();
+        r.write("dir/tracked", b"x").commit(&["."], "init");
+        r.write("dir/new", b"x");
+        let snap = r.snapshot();
+        assert!(snap.has_dirty_descendants(&r.root().join("dir")));
     }
 
     #[test]
     fn dirty_ancestors_does_not_flag_clean_repo() {
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("file"), b"x").unwrap();
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-        let snap = snapshot_for(dir.path());
-        assert!(!snap.has_dirty_descendants(dir.path()));
-        assert!(!snap.has_dirty_descendants(&dir.path().join("file")));
+        let r = TestRepo::new();
+        r.write("file", b"x").commit(&["."], "init");
+        let snap = r.snapshot();
+        assert!(!snap.has_dirty_descendants(r.root()));
+        assert!(!snap.has_dirty_descendants(&r.root().join("file")));
     }
 
     #[test]
@@ -1120,15 +1141,13 @@ mod tests {
     #[test]
     fn has_dirty_descendants_true_for_root_with_dirty_subtree() {
         // `freshl -d <root>` needs the root row itself to flag a dirty tree.
-        let (_g, dir) = fresh_repo();
-        std::fs::write(dir.path().join("a"), b"x").unwrap();
-        run_git(dir.path(), &["add", "."]);
-        run_git(dir.path(), &["commit", "-q", "-m", "init"]);
-        std::fs::write(dir.path().join("a"), b"changed").unwrap();
-        let snap = snapshot_for(dir.path());
-        assert!(snap.has_dirty_descendants(dir.path()));
+        let r = TestRepo::new();
+        r.write("a", b"x").commit(&["."], "init");
+        r.write("a", b"changed");
+        let snap = r.snapshot();
+        assert!(snap.has_dirty_descendants(r.root()));
         assert_eq!(
-            snap.display_code_for(dir.path(), true),
+            snap.display_code_for(r.root(), true),
             PorcelainCode::DIRTY_SUBTREE,
         );
     }

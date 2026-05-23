@@ -18,7 +18,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use gix::bstr::{BStr, BString};
+use gix::bstr::BStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PorcelainCode {
@@ -306,16 +306,23 @@ impl Snapshot {
     }
 }
 
-/// Caches snapshots keyed by canonical scope directory.
+/// Caches snapshots keyed by canonical repository workdir.
 ///
-/// Each cache entry corresponds to one pathspec-limited status walk, so a
-/// multi-target invocation only walks what it has to. Negative results (no
-/// repository at the scope, or path normalisation failed) are cached as
-/// `None`, so `freshl *` in a non-git directory doesn't re-traverse the
-/// filesystem per target.
+/// The status walk is always full-repo (empty pathspec) — pathspec-limited
+/// walks descend into gitignored subtrees in gix (orders of magnitude
+/// slower) for no gain, since `Snapshot::lookup` resolves any path inside
+/// the workdir without needing the walk to have been scoped. Multiple
+/// targets inside the same repo therefore share a single snapshot.
+///
+/// `by_scope` is a separate negative/positive cache mapping each scope
+/// directory to the canonical workdir it resolves to (or `None` if no
+/// repository was found). It saves a second `gix::discover` walk when the
+/// same scope is requested twice and caches negative results so `freshl *`
+/// in a non-git directory doesn't re-traverse the filesystem per target.
 #[derive(Debug, Default)]
 pub struct SnapshotCache {
-    by_scope: HashMap<PathBuf, Option<Snapshot>>,
+    by_scope: HashMap<PathBuf, Option<PathBuf>>,
+    by_workdir: HashMap<PathBuf, Option<Snapshot>>,
 }
 
 impl SnapshotCache {
@@ -327,18 +334,37 @@ impl SnapshotCache {
     pub fn for_target(&mut self, target: &Path) -> Option<&Snapshot> {
         let scope = normalize_existing(&scope_dir(target))?;
         if !self.by_scope.contains_key(&scope) {
-            let snapshot = build_snapshot(&scope);
-            self.by_scope.insert(scope.clone(), snapshot);
+            self.populate_scope(&scope);
         }
-        self.by_scope.get(&scope)?.as_ref()
+        let workdir = self.by_scope.get(&scope)?.clone()?;
+        self.by_workdir.get(&workdir)?.as_ref()
+    }
+
+    fn populate_scope(&mut self, scope: &Path) {
+        // `and_then` chains the two failure modes — no repository, or a
+        // bare repo with no workdir — into a single `None` so the negative
+        // cache only needs one insertion point.
+        let resolved = gix::discover(scope).ok().and_then(|repo| {
+            repo.workdir()
+                .and_then(normalize_existing)
+                .map(|wd| (repo, wd))
+        });
+        let Some((repo, workdir)) = resolved else {
+            self.by_scope.insert(scope.to_path_buf(), None);
+            return;
+        };
+        self.by_scope
+            .insert(scope.to_path_buf(), Some(workdir.clone()));
+        if self.by_workdir.contains_key(&workdir) {
+            return;
+        }
+        let snap = build_snapshot(repo, workdir.clone());
+        self.by_workdir.insert(workdir, snap);
     }
 }
 
-fn build_snapshot(scope: &Path) -> Option<Snapshot> {
-    let repo = gix::discover(scope).ok()?;
-    let workdir = normalize_existing(repo.workdir()?)?;
-    let pathspec = pathspec_for(scope, &workdir)?;
-    let statuses = collect_statuses(&repo, pathspec).unwrap_or_default();
+fn build_snapshot(repo: gix::Repository, workdir: PathBuf) -> Option<Snapshot> {
+    let statuses = collect_statuses(&repo).unwrap_or_default();
     assemble_snapshot(repo, workdir, statuses)
 }
 
@@ -361,16 +387,6 @@ fn normalize_existing(path: &Path) -> Option<PathBuf> {
         .or_else(|| std::path::absolute(path).ok())
 }
 
-fn pathspec_for(scope: &Path, workdir: &Path) -> Option<Vec<BString>> {
-    let rel = scope.strip_prefix(workdir).ok()?;
-    let bytes = rel.as_os_str().as_bytes();
-    if bytes.is_empty() {
-        Some(Vec::new())
-    } else {
-        Some(vec![BString::from(bytes.to_vec())])
-    }
-}
-
 fn rela_to_pathbuf(b: &BStr) -> PathBuf {
     // gix paths are raw bytes; on Unix go through OsStr directly so non-UTF-8
     // names survive (to_os_str_lossy would replace invalid sequences with U+FFFD).
@@ -381,7 +397,7 @@ fn rela_to_pathbuf(b: &BStr) -> PathBuf {
 pub fn discover(start: &Path) -> Option<Snapshot> {
     let repo = gix::discover(start).ok()?;
     let workdir = normalize_existing(repo.workdir()?)?;
-    let statuses = collect_statuses(&repo, Vec::new()).unwrap_or_default();
+    let statuses = collect_statuses(&repo).unwrap_or_default();
     assemble_snapshot(repo, workdir, statuses)
 }
 
@@ -461,7 +477,6 @@ fn iter_ancestors(rel: &Path) -> impl Iterator<Item = &Path> {
 
 fn collect_statuses(
     repo: &gix::Repository,
-    pathspec: Vec<BString>,
 ) -> Result<HashMap<PathBuf, PorcelainCode>, Box<dyn std::error::Error>> {
     let mut out: HashMap<PathBuf, PorcelainCode> = HashMap::new();
 
@@ -474,7 +489,10 @@ fn collect_statuses(
         .index_worktree_rewrites(gix::diff::Rewrites::default())
         .dirwalk_options(|opts| opts.emit_ignored(Some(gix::dir::walk::EmissionMode::Matching)));
 
-    let iter = platform.into_iter(pathspec)?;
+    // Empty pathspec: always walk the full repo. A non-empty pathspec
+    // forces gix to descend into gitignored subtrees (e.g. `node_modules/`),
+    // turning what should be ~10 ms into ~1.6 s.
+    let iter = platform.into_iter(Vec::new())?;
     for item in iter {
         let item = item?;
         match item {
@@ -1108,11 +1126,11 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_cache_walks_each_scope_independently() {
-        // Make `a/` have tracked-clean content plus one untracked file, and
-        // `b/` similar but distinguishable — that way the pathspec walks
-        // actually have to descend (collapsed mode would otherwise emit the
-        // whole subdir as a single untracked entry).
+    fn snapshot_cache_shares_snapshot_across_subdirs_in_same_repo() {
+        // Two subdirectories of the same repo must resolve to the *same*
+        // snapshot — one full-repo walk, not one per scope. Sharing also
+        // ensures the snapshot's `statuses` covers both subtrees so a
+        // lookup outside the originally-requested scope still works.
         let r = TestRepo::new();
         r.write("a/tracked", b"x")
             .write("b/tracked", b"x")
@@ -1120,24 +1138,18 @@ mod tests {
         r.write("a/only_a", b"x").write("b/only_b", b"x");
 
         let mut cache = SnapshotCache::new();
-        let in_a: Vec<_> = cache
+        let first_ptr: *const Snapshot = cache.for_target(&r.root().join("a")).unwrap();
+        let second_ptr: *const Snapshot = cache.for_target(&r.root().join("b")).unwrap();
+        assert!(std::ptr::eq(first_ptr, second_ptr));
+        let statuses: Vec<_> = cache
             .for_target(&r.root().join("a"))
             .unwrap()
             .statuses
             .keys()
             .cloned()
             .collect();
-        let in_b: Vec<_> = cache
-            .for_target(&r.root().join("b"))
-            .unwrap()
-            .statuses
-            .keys()
-            .cloned()
-            .collect();
-        assert!(in_a.iter().any(|p| p.ends_with("only_a")));
-        assert!(!in_a.iter().any(|p| p.ends_with("only_b")));
-        assert!(in_b.iter().any(|p| p.ends_with("only_b")));
-        assert!(!in_b.iter().any(|p| p.ends_with("only_a")));
+        assert!(statuses.iter().any(|p| p.ends_with("only_a")));
+        assert!(statuses.iter().any(|p| p.ends_with("only_b")));
     }
 
     #[test]
@@ -1145,6 +1157,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = SnapshotCache::new();
         assert!(cache.for_target(dir.path()).is_none());
+    }
+
+    #[test]
+    fn snapshot_cache_returns_none_when_build_fails() {
+        // Cache the negative result of `build_snapshot` returning `None`
+        // (corrupt index here, same trigger as `discover_returns_none_for_corrupt_index`).
+        // The workdir is still recorded in `by_scope`/`by_workdir` so a
+        // second lookup is free instead of re-attempting the failed build.
+        let r = TestRepo::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DIRC");
+        bytes.extend_from_slice(&0x99_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 20]);
+        std::fs::write(r.root().join(".git/index"), &bytes).unwrap();
+        let mut cache = SnapshotCache::new();
+        assert!(cache.for_target(r.root()).is_none());
+        assert!(cache.for_target(r.root()).is_none());
     }
 
     #[test]
@@ -1183,32 +1213,6 @@ mod tests {
             result,
             Some(PathBuf::from("/tmp/freshl-definitely-missing-12345"))
         );
-    }
-
-    #[test]
-    fn pathspec_for_returns_empty_when_scope_equals_workdir() {
-        use super::pathspec_for;
-        let workdir = PathBuf::from("/repo");
-        let patterns = pathspec_for(&workdir, &workdir).unwrap();
-        assert!(patterns.is_empty());
-    }
-
-    #[test]
-    fn pathspec_for_returns_relative_pattern_for_subdir() {
-        use super::pathspec_for;
-        let scope = PathBuf::from("/repo/src");
-        let workdir = PathBuf::from("/repo");
-        let patterns = pathspec_for(&scope, &workdir).unwrap();
-        assert_eq!(patterns.len(), 1);
-        assert_eq!(patterns[0].as_slice(), b"src");
-    }
-
-    #[test]
-    fn pathspec_for_returns_none_for_unrelated_paths() {
-        use super::pathspec_for;
-        let scope = PathBuf::from("/elsewhere");
-        let workdir = PathBuf::from("/repo");
-        assert!(pathspec_for(&scope, &workdir).is_none());
     }
 
     #[test]
@@ -1378,22 +1382,26 @@ mod tests {
     }
 
     #[test]
-    fn lookup_consults_exclude_stack_for_file_outside_walk_scope() {
-        // FILE-mode exclude check: the path must exist on disk (so
-        // `lookup`'s `stat` gives `is_directory=Some(false)`), live outside
-        // the snapshot's pathspec scope (so it isn't in `statuses`), and
-        // not be tracked (so `tracked_prefixes` doesn't catch it). Then
-        // `path_is_excluded` runs with `Mode::FILE` and the exclude rule
-        // decides the verdict.
+    fn lookup_consults_exclude_stack_for_unwalked_paths() {
+        // Paths the status walk didn't see fall through `statuses` and
+        // `tracked_prefixes`; the exclude stack is the only thing left to
+        // decide IGNORED vs UNTRACKED. Two flavours exercise both
+        // `kind_resolver` branches inside `lookup`: missing-on-disk (lstat
+        // fails, resolver returns `None`, both DIR and FILE modes are
+        // tried) and created-after-the-snapshot (lstat succeeds, resolver
+        // returns `Some(false)`, only FILE mode is tried).
         let r = TestRepo::new();
         r.write(".gitignore", b"*.log\n")
-            .write("a/tracked", b"x")
+            .write("anchor", b"x")
             .commit(&["."], "init");
-        r.write("b/foo.log", b"x");
-        let mut cache = SnapshotCache::new();
-        let snap = cache.for_target(&r.root().join("a")).expect("repo present");
+        let snap = r.snapshot();
         assert_eq!(
-            snap.lookup(&r.root().join("b/foo.log")),
+            snap.lookup(&r.root().join("missing.log")),
+            PorcelainCode::IGNORED,
+        );
+        r.write("created_after_snapshot.log", b"x");
+        assert_eq!(
+            snap.lookup(&r.root().join("created_after_snapshot.log")),
             PorcelainCode::IGNORED,
         );
     }

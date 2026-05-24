@@ -149,8 +149,10 @@ impl Snapshot {
     /// Unknown paths are classified as `UNTRACKED` (or `IGNORED` if the
     /// exclude stack matches) — never `CLEAN`. `CLEAN` is reserved for
     /// paths the index has positive proof of (see `lookup_rel`).
-    /// Paths outside the snapshot's workdir return [`PorcelainCode::BLANK`]
-    /// so cross-repo arguments render no glyph instead of a spurious `?`.
+    /// `PorcelainCode::BLANK` is returned for paths outside the snapshot's
+    /// workdir (so cross-repo arguments render no glyph instead of a spurious
+    /// `?`) and for the repo's own `.git` directory and anything beneath it
+    /// (the git column has nothing meaningful to say about its own metadata).
     ///
     /// Filesystem kind probing is deferred to the cold path — only the
     /// exclude check needs it, so `lookup`'s common case (path is in
@@ -183,6 +185,17 @@ impl Snapshot {
         rel: &Path,
         kind_resolver: F,
     ) -> PorcelainCode {
+        // The repo's own metadata at `.git` isn't source-controlled (a
+        // directory in a primary worktree, a linkfile in a secondary
+        // worktree). `Path::starts_with` matches component-wise, so this
+        // catches `.git` and `.git/HEAD` but not sibling names like
+        // `.gitignore`, and not a nested `subdir/.git` — the latter is
+        // either a submodule linkfile (resolved to CLEAN below because
+        // its `subdir` ancestor is in `submodule_roots`) or a stray file
+        // (falls through to UNTRACKED).
+        if rel.starts_with(".git") {
+            return PorcelainCode::BLANK;
+        }
         if let Some(code) = self.statuses.get(rel).copied() {
             return code;
         }
@@ -1508,6 +1521,119 @@ mod tests {
         let snap = r.snapshot();
         assert_eq!(
             snap.lookup(&r.root().join("parent/child")),
+            PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn dot_git_dir_looks_up_as_blank() {
+        // The repo's own metadata isn't source-controlled. The git column
+        // should render nothing, not a spurious `?` glyph.
+        let r = TestRepo::new();
+        assert_eq!(
+            r.snapshot().lookup(&r.root().join(".git")),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn dot_git_descendants_look_up_as_blank() {
+        // The short-circuit's prefix clause catches `.git/HEAD`,
+        // `.git/config`, and anything else nested under the gitdir.
+        let r = TestRepo::new();
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.lookup(&r.root().join(".git/HEAD")),
+            PorcelainCode::BLANK,
+        );
+        assert_eq!(
+            snap.lookup(&r.root().join(".git/config")),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn display_code_for_dot_git_is_blank() {
+        // Renderer-facing API: must also report BLANK so a `freshl ls -a`
+        // row for `.git` shows no glyph.
+        let r = TestRepo::new();
+        assert_eq!(
+            r.snapshot().display_code_for(&r.root().join(".git"), true),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn display_code_for_consults_exclude_stack_on_missing_path() {
+        // Cold-path exercise for `display_code_for`'s `|| Some(is_directory)`
+        // resolver, which is a distinct closure type from `lookup`'s
+        // `symlink_metadata` resolver. A path that doesn't exist on disk
+        // and isn't in the index falls through `statuses` and
+        // `tracked_prefixes`; `path_is_excluded` then calls the resolver
+        // to pick DIR vs FILE mode for the exclude check.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"*.log\n")
+            .write("anchor", b"x")
+            .commit(&["."], "init");
+        assert_eq!(
+            r.snapshot()
+                .display_code_for(&r.root().join("missing.log"), false),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn submodule_dot_git_linkfile_resolves_to_clean() {
+        // The submodule's `.git` linkfile is at a nested path
+        // (`submod/.git`), so the `.git` short-circuit doesn't fire
+        // (`starts_with` is component-wise; the first component is
+        // `submod`). It resolves to CLEAN via the ancestor walk, because
+        // `submod` is in `submodule_roots`. This pins that the short-
+        // circuit doesn't over-match nested `.git` basenames. Setup
+        // mirrors submodule_contents_resolve_to_clean.
+        let r = TestRepo::new();
+        let inner = tempfile::tempdir().unwrap();
+        run_git(inner.path(), &["init", "-q", "-b", "main"]);
+        run_git(inner.path(), &["config", "user.email", "t@example.invalid"]);
+        run_git(inner.path(), &["config", "user.name", "t"]);
+        std::fs::write(inner.path().join("inside"), b"x").unwrap();
+        run_git(inner.path(), &["add", "inside"]);
+        run_git(inner.path(), &["commit", "-q", "-m", "inner"]);
+        let inner_url = format!("file://{}", inner.path().display());
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(r.root())
+            .args(["-c", "protocol.file.allow=always"])
+            .args(["submodule", "add", "-q", &inner_url, "submod"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("HOME", r.root())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git submodule add failed");
+        r.commit(&["."], "add submod");
+        assert_eq!(
+            r.snapshot().lookup(&r.root().join("submod/.git")),
+            PorcelainCode::CLEAN,
+        );
+    }
+
+    #[test]
+    fn dot_git_only_special_at_real_gitdir() {
+        // A stray file named `.git` inside a subdirectory (not a
+        // submodule, not a nested repo registered with the parent) is
+        // *not* this repo's metadata. The short-circuit's component-wise
+        // `starts_with` check leaves `subdir/.git` alone (its first
+        // component is `subdir`, not `.git`); the ancestor walk inherits
+        // UNTRACKED from `subdir`, which gix emits as collapsed-untracked.
+        // This pins the check against a refactor to `rel.file_name() ==
+        // Some(".git")`, which would over-match here.
+        let r = TestRepo::new();
+        r.write("subdir/.git", b"not a real linkfile\n");
+        let snap = r.snapshot();
+        assert_eq!(snap.lookup(&r.root().join(".git")), PorcelainCode::BLANK);
+        assert_eq!(
+            snap.lookup(&r.root().join("subdir/.git")),
             PorcelainCode::UNTRACKED,
         );
     }

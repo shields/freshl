@@ -33,7 +33,9 @@ piratical.
 
 Symlinks are always followed: a row reads `name → target` (or
 `name → mid → target` for multi-hop), with the final target in its natural
-per-kind color. Broken symlinks keep the arrow form with the target in red.
+per-kind color. A broken link still shows the full chain up to the break, with
+the unresolved target in red; its mode and size columns are dimmed, since they
+describe the link itself rather than a resolved file.
 
 ## Display
 

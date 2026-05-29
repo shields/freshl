@@ -20,9 +20,8 @@ use crate::entry::{Entry, EntryKind};
 /// Resolves the right `anstyle::Style` for each `Entry` from `$LS_COLORS`.
 ///
 /// The lookup classifies the entry into an `LS_COLORS` `Indicator` using only
-/// data already on the entry (mode, name, target presence) — no extra stat
-/// calls. Extension and filename rules apply to regular files only, matching
-/// `ls`.
+/// data already on the entry (mode, name, kind) — no extra stat calls.
+/// Extension and filename rules apply to regular files only, matching `ls`.
 #[derive(Debug, Clone)]
 pub struct Palette {
     inner: LsColors,
@@ -53,8 +52,8 @@ impl Palette {
     }
 
     #[must_use]
-    pub fn style_for(&self, entry: &Entry, target_missing: bool) -> Style {
-        let indicator = self.indicator_for(entry, target_missing);
+    pub fn style_for(&self, entry: &Entry) -> Style {
+        let indicator = self.indicator_for(entry);
         // Extension/filename rules only fire when classification stayed at
         // `RegularFile`. `file_indicator` only promotes to ex/su/sg/mh when
         // the user has actually configured that indicator, so an unset `ex`
@@ -104,13 +103,13 @@ impl Palette {
             .map_or_else(Style::new, to_anstyle)
     }
 
-    fn indicator_for(&self, entry: &Entry, target_missing: bool) -> Indicator {
+    fn indicator_for(&self, entry: &Entry) -> Indicator {
         match entry.kind {
             EntryKind::Directory => self.dir_indicator(entry.mode),
-            // `or` colors the link itself; `mi` is for the target string and
-            // is left to the caller that renders the target column.
-            EntryKind::Symlink if target_missing => Indicator::OrphanedSymbolicLink,
-            EntryKind::Symlink => Indicator::SymbolicLink,
+            // A surviving `Symlink` kind is a broken link — resolved links take
+            // their target's kind. `or` colors the link itself; `mi` is for the
+            // target string, left to the caller that renders it.
+            EntryKind::Symlink => Indicator::OrphanedSymbolicLink,
             EntryKind::RegularFile => self.file_indicator(entry.mode, entry.nlink),
             EntryKind::CharDevice => Indicator::CharacterDevice,
             EntryKind::BlockDevice => Indicator::BlockDevice,
@@ -243,7 +242,6 @@ mod tests {
             size: 0,
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: None,
             dev: 0,
             ino: 0,
             follow_chain: Vec::new(),
@@ -253,7 +251,7 @@ mod tests {
     #[test]
     fn gnu_defaults_color_directory_bold_blue() {
         let palette = Palette::from_string("");
-        let style = palette.style_for(&entry("d", EntryKind::Directory), false);
+        let style = palette.style_for(&entry("d", EntryKind::Directory));
         let s = format!("{style}");
         assert!(s.contains("34"), "expected blue SGR: {s:?}");
         assert!(s.contains('1'), "expected bold SGR: {s:?}");
@@ -262,14 +260,14 @@ mod tests {
     #[test]
     fn regular_file_has_no_style_under_gnu_defaults() {
         let palette = Palette::from_string("");
-        let style = palette.style_for(&entry("f", EntryKind::RegularFile), false);
+        let style = palette.style_for(&entry("f", EntryKind::RegularFile));
         assert_eq!(format!("{style}"), String::new());
     }
 
     #[test]
     fn extension_rule_paints_regular_file() {
         let palette = Palette::from_string("*.rs=38;5;202");
-        let style = palette.style_for(&entry("main.rs", EntryKind::RegularFile), false);
+        let style = palette.style_for(&entry("main.rs", EntryKind::RegularFile));
         let s = format!("{style}");
         assert!(s.contains("202"), "expected fixed-256 color 202: {s:?}");
     }
@@ -279,7 +277,7 @@ mod tests {
         let palette = Palette::from_string("ex=31");
         let mut e = entry("run", EntryKind::RegularFile);
         e.mode = 0o100_755;
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("31"), "expected red SGR for ex: {s:?}");
     }
@@ -289,7 +287,7 @@ mod tests {
         let palette = Palette::from_string("ex=31:su=37;41");
         let mut e = entry("priv", EntryKind::RegularFile);
         e.mode = 0o104_755;
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("41"), "expected red bg for setuid: {s:?}");
     }
@@ -299,7 +297,7 @@ mod tests {
         let palette = Palette::from_string("ow=30;43");
         let mut e = entry("shared", EntryKind::Directory);
         e.mode = 0o040_777;
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("43"), "expected yellow bg: {s:?}");
     }
@@ -309,7 +307,7 @@ mod tests {
         let palette = Palette::from_string("tw=30;42:ow=30;43");
         let mut e = entry("tmp", EntryKind::Directory);
         e.mode = 0o041_777;
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("42"), "expected green bg: {s:?}");
     }
@@ -317,17 +315,24 @@ mod tests {
     #[test]
     fn orphan_symlink_uses_or_when_set() {
         let palette = Palette::from_string("or=40;31;01");
-        let style = palette.style_for(&entry("broken", EntryKind::Symlink), true);
+        let style = palette.style_for(&entry("broken", EntryKind::Symlink));
         let s = format!("{style}");
         assert!(s.contains("31"), "expected red SGR: {s:?}");
     }
 
     #[test]
     fn live_symlink_uses_ln_not_or() {
+        // Live links never reach `style_for` with a `Symlink` kind — they're
+        // reclassified to the target's kind. The chain renderer styles the link
+        // side via `style_for_symlink`, which resolves to `ln`, not `or`.
         let palette = Palette::from_string("ln=35:or=31");
-        let style = palette.style_for(&entry("link", EntryKind::Symlink), false);
+        let style = palette.style_for_symlink();
         let s = format!("{style}");
-        assert!(s.contains("35"), "expected magenta SGR: {s:?}");
+        assert!(s.contains("35"), "expected magenta ln SGR: {s:?}");
+        assert!(
+            !s.contains("31"),
+            "or must not leak onto the link side: {s:?}"
+        );
     }
 
     #[test]
@@ -339,7 +344,7 @@ mod tests {
             (EntryKind::BlockDevice, "46"),
             (EntryKind::CharDevice, "43"),
         ] {
-            let style = palette.style_for(&entry("x", kind), false);
+            let style = palette.style_for(&entry("x", kind));
             let s = format!("{style}");
             assert!(s.contains(expect), "{kind:?} expected {expect}: {s:?}");
         }
@@ -358,7 +363,7 @@ mod tests {
             EntryKind::CharDevice,
             EntryKind::Other,
         ] {
-            let style = palette.style_for(&entry("x", kind), false);
+            let style = palette.style_for(&entry("x", kind));
             assert_eq!(format!("{style}"), String::new(), "{kind:?}");
         }
     }
@@ -371,7 +376,7 @@ mod tests {
         // U+FFFD substitution preserves the ".rs" suffix so the extension
         // rule still fires, matching GNU ls's byte-wise suffix matching.
         e.name = OsString::from_vec(vec![b'b', 0xFF, b'.', b'r', b's']);
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         assert!(format!("{style}").contains("31"));
     }
 
@@ -385,7 +390,7 @@ mod tests {
         // Without `or`, lscolors' own fallback chain hands OrphanedSymbolicLink
         // off to SymbolicLink — a broken link should still get the `ln` color.
         let palette = Palette::from_string("ln=35");
-        let style = palette.style_for(&entry("broken", EntryKind::Symlink), true);
+        let style = palette.style_for(&entry("broken", EntryKind::Symlink));
         let s = format!("{style}");
         assert!(
             s.contains("35"),
@@ -412,7 +417,7 @@ mod tests {
         let palette = Palette::from_string("st=37;44");
         let mut e = entry("d", EntryKind::Directory);
         e.mode = 0o041_755; // sticky bit set, world bits unset
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("44"), "expected blue bg for st: {s:?}");
     }
@@ -422,7 +427,7 @@ mod tests {
         let palette = Palette::from_string("sg=30;46");
         let mut e = entry("svc", EntryKind::RegularFile);
         e.mode = 0o102_755; // setgid bit set
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("46"), "expected cyan bg for sg: {s:?}");
     }
@@ -432,7 +437,7 @@ mod tests {
         let palette = Palette::from_string("mh=35");
         let mut e = entry("twin", EntryKind::RegularFile);
         e.nlink = 2;
-        let style = palette.style_for(&e, false);
+        let style = palette.style_for(&e);
         let s = format!("{style}");
         assert!(s.contains("35"), "expected magenta for mh: {s:?}");
     }
@@ -453,7 +458,7 @@ mod tests {
             ("a.bc", "96"),
             ("a.bw", "97"),
         ] {
-            let style = palette.style_for(&entry(name, EntryKind::RegularFile), false);
+            let style = palette.style_for(&entry(name, EntryKind::RegularFile));
             let s = format!("{style}");
             assert!(s.contains(code), "{name} expected SGR {code}: {s:?}");
         }
@@ -462,7 +467,7 @@ mod tests {
     #[test]
     fn rgb_color_converts_through_anstyle() {
         let palette = Palette::from_string("*.rgb=38;2;100;50;25");
-        let style = palette.style_for(&entry("a.rgb", EntryKind::RegularFile), false);
+        let style = palette.style_for(&entry("a.rgb", EntryKind::RegularFile));
         let s = format!("{style}");
         assert!(s.contains("100"), "expected RGB component: {s:?}");
     }
@@ -471,7 +476,7 @@ mod tests {
     fn all_font_effects_convert_through_anstyle() {
         // SGR 1;2;3;4;5;7;8;9 = bold;dim;italic;underline;blink;reverse;hidden;strike.
         let palette = Palette::from_string("*.fx=1;2;3;4;5;7;8;9");
-        let style = palette.style_for(&entry("a.fx", EntryKind::RegularFile), false);
+        let style = palette.style_for(&entry("a.fx", EntryKind::RegularFile));
         let s = format!("{style}");
         for code in ['1', '2', '3', '4', '5', '7', '8', '9'] {
             assert!(s.contains(code), "expected effect SGR {code}: {s:?}");
@@ -483,7 +488,7 @@ mod tests {
         // SGR 6 = rapid_blink, distinct from 5 = slow_blink but both map to
         // anstyle's BLINK effect.
         let palette = Palette::from_string("*.fx=6");
-        let style = palette.style_for(&entry("a.fx", EntryKind::RegularFile), false);
+        let style = palette.style_for(&entry("a.fx", EntryKind::RegularFile));
         assert!(
             format!("{style}").contains('5'),
             "rapid_blink → anstyle BLINK (SGR 5)"

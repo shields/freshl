@@ -56,20 +56,27 @@ pub struct Entry {
     pub size: u64,
     pub rdev: u64,
     pub mtime: SystemTime,
-    // Populated only on the broken-symlink fallback path, where `stat` failed
-    // and we kept the lstat representation so the row still appears. Healthy
-    // symlinks express their target through `follow_chain` instead.
-    pub symlink_target: Option<PathBuf>,
     // Filesystem identity of the *recorded* metadata (target for resolved
     // symlinks, link for broken ones). Read by `list_recursive`'s cycle check
     // so a symlink that resolves back into its own ancestor chain is skipped.
     pub dev: u64,
     pub ino: u64,
     // Readlink targets traversed while resolving this row. `[0]` is
-    // `readlink(name)`; `last()` is the final non-symlink the chain
-    // terminates in. Empty for non-symlinks and for broken-symlink fallbacks
-    // (the chain isn't built when `stat` failed).
+    // `readlink(name)`; `last()` is the final hop. For a resolved symlink that
+    // is the target it terminates in; for a broken one it's the unresolved
+    // target (a missing path, or the node a cycle loops back to). Empty for
+    // non-symlinks and for the rare broken link whose `readlink` itself fails.
     pub follow_chain: Vec<PathBuf>,
+}
+
+impl Entry {
+    /// A symlink whose target could not be resolved. `entry_for_path`
+    /// reclassifies a resolved link to its target's kind, so a surviving
+    /// `Symlink` kind means the follow failed (missing target or a cycle).
+    #[must_use]
+    pub const fn is_broken_link(&self) -> bool {
+        matches!(self.kind, EntryKind::Symlink)
+    }
 }
 
 #[cfg(test)]

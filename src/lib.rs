@@ -396,7 +396,7 @@ fn should_descend(entry: &Entry, snapshot: Option<&Snapshot>, options: ListOptio
 /// files for ignore matching (see gitignore(5): "Symbolic links to
 /// directories are not considered directories for the purpose of matching").
 fn is_real_dir(entry: &Entry) -> bool {
-    entry.kind == EntryKind::Directory && entry.symlink_target.is_none()
+    entry.kind == EntryKind::Directory && entry.follow_chain.is_empty()
 }
 
 fn render_entries(
@@ -453,10 +453,11 @@ fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<
     if let Some(c) = code {
         row.git = Some(format::git_col::render(c));
     }
-    let ignored = code == Some(PorcelainCode::IGNORED);
-    let missing = entry.kind == EntryKind::Symlink && target_is_missing(entry);
-    if ignored || missing {
-        row.name = format::name::format_name(palette, entry, ignored, missing);
+    // `build_row` already rendered the name (including the broken-link arrow and
+    // dimmed columns, which it derives from the entry's kind). Only the
+    // git-derived "ignored" dimming is unknown until now, so re-render for that.
+    if code == Some(PorcelainCode::IGNORED) {
+        row.name = format::name::format_name(palette, entry, true);
     }
 }
 
@@ -468,21 +469,6 @@ fn write_rows(stdout: &mut dyn Write, rows: &[Row], git_width: usize) -> Result<
         stdout.write_all(b"\n").map_err(stdout_io)?;
     }
     Ok(())
-}
-
-fn target_is_missing(entry: &Entry) -> bool {
-    let Some(target) = &entry.symlink_target else {
-        return false;
-    };
-    let absolute = if target.is_absolute() {
-        target.clone()
-    } else {
-        entry
-            .path
-            .parent()
-            .map_or_else(|| target.clone(), |parent| parent.join(target))
-    };
-    std::fs::metadata(absolute).is_err()
 }
 
 // Write the path's raw OS bytes followed by `suffix`. Filenames on Unix are
@@ -751,16 +737,16 @@ mod tests {
     }
 
     #[test]
-    fn target_is_missing_handles_absolute() {
-        use super::target_is_missing;
+    fn is_real_dir_distinguishes_directory_from_symlink_to_dir() {
+        use super::is_real_dir;
         use crate::entry::{Entry, EntryKind};
         use std::ffi::OsString;
         use std::path::PathBuf;
         use std::time::SystemTime;
-        let e = Entry {
-            name: OsString::from("link"),
-            path: PathBuf::from("/tmp/link"),
-            kind: EntryKind::Symlink,
+        let mut e = Entry {
+            name: OsString::from("d"),
+            path: PathBuf::from("d"),
+            kind: EntryKind::Directory,
             mode: 0,
             nlink: 0,
             uid: 0,
@@ -768,66 +754,17 @@ mod tests {
             size: 0,
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: Some(PathBuf::from("/definitely/does/not/exist/anywhere")),
             dev: 0,
             ino: 0,
             follow_chain: Vec::new(),
         };
-        assert!(target_is_missing(&e));
-    }
-
-    #[test]
-    fn target_is_missing_is_false_when_target_is_none() {
-        use super::target_is_missing;
-        use crate::entry::{Entry, EntryKind};
-        use std::ffi::OsString;
-        use std::path::PathBuf;
-        use std::time::SystemTime;
-        let e = Entry {
-            name: OsString::from("file"),
-            path: PathBuf::from("file"),
-            kind: EntryKind::RegularFile,
-            mode: 0,
-            nlink: 0,
-            uid: 0,
-            gid: 0,
-            size: 0,
-            rdev: 0,
-            mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: None,
-            dev: 0,
-            ino: 0,
-            follow_chain: Vec::new(),
-        };
-        assert!(!target_is_missing(&e));
-    }
-
-    #[test]
-    fn target_is_missing_resolves_relative_when_link_path_has_no_parent() {
-        use super::target_is_missing;
-        use crate::entry::{Entry, EntryKind};
-        use std::ffi::OsString;
-        use std::path::PathBuf;
-        use std::time::SystemTime;
-        // `Path::new("/").parent()` returns `None`, exercising the
-        // `map_or_else` no-parent arm in `target_is_missing`.
-        let e = Entry {
-            name: OsString::from("/"),
-            path: PathBuf::from("/"),
-            kind: EntryKind::Symlink,
-            mode: 0,
-            nlink: 0,
-            uid: 0,
-            gid: 0,
-            size: 0,
-            rdev: 0,
-            mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: Some(PathBuf::from("does-not-exist-anywhere")),
-            dev: 0,
-            ino: 0,
-            follow_chain: Vec::new(),
-        };
-        assert!(target_is_missing(&e));
+        // A real directory has no follow chain.
+        assert!(is_real_dir(&e));
+        // A symlink-to-directory is reclassified to `Directory` but carries a
+        // follow chain; gitignore(5) matches it as a file, not a directory, so
+        // it must not count as a "real" dir.
+        e.follow_chain = vec![PathBuf::from("target")];
+        assert!(!is_real_dir(&e));
     }
 
     #[test]

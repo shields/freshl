@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -76,10 +77,11 @@ fn process_paths(iter: &mut dyn Iterator<Item = io::Result<PathBuf>>, parent: &P
 /// Build an [`Entry`] for a single path.
 ///
 /// Symlinks are followed: a symlink whose target can be `stat(2)`'d is
-/// reported as the *target* (target mode/owner/size/kind), with the readlink
-/// chain recorded in `follow_chain` for display. Broken symlinks fall back
-/// to the lstat representation so the row still appears in the listing
-/// (matching `find -L` semantics).
+/// reported as the *target* (target mode/owner/size/kind). A broken link
+/// (dangling target or cycle) falls back to the lstat representation so the
+/// row still appears, with `kind` left as `Symlink` to mark it broken
+/// (matching `find -L` semantics). Either way the readlink chain — up to the
+/// break for a broken link — is recorded in `follow_chain` for display.
 ///
 /// # Errors
 ///
@@ -90,25 +92,23 @@ pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
     let lkind = classify(lmeta.mode());
 
     if lkind != EntryKind::Symlink {
-        return Ok(make_entry(path, &lmeta, lkind, None));
+        return Ok(make_entry(path, &lmeta, lkind));
     }
 
-    // `fs::metadata` is `stat(2)`; symlink cycles surface as ELOOP and the
-    // `Err` drops us onto the lstat fallback below, so the kernel's
-    // MAXSYMLINKS bounds the work.
-    if let Ok(tmeta) = fs::metadata(path) {
+    // Follow the link. `fs::metadata` is `stat(2)`: success reports the target's
+    // metadata and kind. A dangling target (ENOENT) or a cycle (ELOOP) lands on
+    // the lstat fallback, where `kind` stays `Symlink` as the broken marker —
+    // a resolved link is reclassified to its target's kind. The kernel's
+    // MAXSYMLINKS bounds the `stat` work either way.
+    let (meta, kind) = fs::metadata(path).map_or((lmeta, lkind), |tmeta| {
         let tkind = classify(tmeta.mode());
-        let mut entry = make_entry(path, &tmeta, tkind, None);
-        entry.follow_chain = build_follow_chain(path);
-        return Ok(entry);
-    }
-
-    // If `read_link` fails on a path lstat'd as a symlink (rare — usually a
-    // TOCTOU race or unusual filesystem), keep the entry so the user still
-    // sees the symlink name in the listing; we just leave `symlink_target`
-    // empty rather than dropping the entry entirely.
-    let symlink_target = fs::read_link(path).ok();
-    Ok(make_entry(path, &lmeta, lkind, symlink_target))
+        (tmeta, tkind)
+    });
+    // Every surviving symlink records its readlink chain — up to the break for a
+    // broken one — so the name column can show `link → … → target`.
+    let mut entry = make_entry(path, &meta, kind);
+    entry.follow_chain = build_follow_chain(path);
+    Ok(entry)
 }
 
 // Walk the readlink chain from `start`, recording each hop's target text.
@@ -117,6 +117,7 @@ pub fn entry_for_path(path: &Path) -> io::Result<Entry> {
 fn build_follow_chain(start: &Path) -> Vec<PathBuf> {
     const MAX_HOPS: usize = 40;
     let mut chain = Vec::new();
+    let mut visited = HashSet::new();
     let mut current = start.to_path_buf();
     for _ in 0..MAX_HOPS {
         let Ok(target) = fs::read_link(&current) else {
@@ -128,20 +129,18 @@ fn build_follow_chain(start: &Path) -> Vec<PathBuf> {
             current.parent().unwrap_or(&current).join(&target)
         };
         chain.push(target);
+        // Advance only into an unvisited symlink. A repeated hop is a cycle:
+        // stop with the loop-back hop kept in the chain so the name shows where
+        // it closes, rather than walking all the way to `MAX_HOPS`.
         match fs::symlink_metadata(&next) {
-            Ok(m) if m.file_type().is_symlink() => current = next,
+            Ok(m) if m.file_type().is_symlink() && visited.insert(next.clone()) => current = next,
             _ => break,
         }
     }
     chain
 }
 
-fn make_entry(
-    path: &Path,
-    meta: &fs::Metadata,
-    kind: EntryKind,
-    symlink_target: Option<PathBuf>,
-) -> Entry {
+fn make_entry(path: &Path, meta: &fs::Metadata, kind: EntryKind) -> Entry {
     let name = path.file_name().map_or_else(
         || path.as_os_str().to_os_string(),
         std::ffi::OsStr::to_os_string,
@@ -157,7 +156,6 @@ fn make_entry(
         size: meta.size(),
         rdev: meta.rdev(),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-        symlink_target,
         dev: meta.dev(),
         ino: meta.ino(),
         follow_chain: Vec::new(),
@@ -258,14 +256,14 @@ mod tests {
         symlink(dir.path().join("nope"), &link).unwrap();
         let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
-        assert!(entry.symlink_target.is_some());
+        assert_eq!(entry.follow_chain, vec![dir.path().join("nope")]);
     }
 
     #[test]
     fn entry_for_path_symlink_cycle_falls_back_without_looping() {
-        // Pins the loop-safety contract: ELOOP from stat(2) drops us onto the
-        // lstat fallback, so a hand-rolled symlink walk could not silently
-        // replace it.
+        // Pins the loop-safety contract: stat(2) returns ELOOP, dropping us onto
+        // the lstat fallback, and `build_follow_chain`'s cycle guard truncates
+        // the walk instead of running all the way to MAX_HOPS.
         let dir = tempdir().unwrap();
         let a = dir.path().join("loop_a");
         let b = dir.path().join("loop_b");
@@ -273,7 +271,11 @@ mod tests {
         symlink(&a, &b).unwrap();
         let entry = entry_for_path(&a).unwrap();
         assert_eq!(entry.kind, EntryKind::Symlink);
-        assert!(entry.follow_chain.is_empty());
+        let hops = entry.follow_chain.len();
+        assert!(
+            hops > 0 && hops < 10,
+            "cycle guard should truncate, got {hops} hops"
+        );
     }
 
     #[test]
@@ -286,7 +288,7 @@ mod tests {
 
         let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::RegularFile);
-        assert!(entry.symlink_target.is_none());
+        assert!(!entry.is_broken_link());
         assert_eq!(entry.size, b"contents".len() as u64);
     }
 
@@ -300,17 +302,21 @@ mod tests {
 
         let entry = entry_for_path(&link).unwrap();
         assert_eq!(entry.kind, EntryKind::Directory);
-        assert!(entry.symlink_target.is_none());
+        assert!(!entry.is_broken_link());
     }
 
     #[test]
     fn entry_for_path_falls_back_on_broken_symlink() {
         let dir = tempdir().unwrap();
+        let target = dir.path().join("nope");
         let link = dir.path().join("dangling");
-        symlink(dir.path().join("nope"), &link).unwrap();
+        symlink(&target, &link).unwrap();
         let entry = entry_for_path(&link).unwrap();
+        // The fallback keeps the lstat representation: kind stays Symlink and
+        // the columns describe the link inode — a symlink's `st_size` is the
+        // byte length of the target path, not a resolved file's size.
         assert_eq!(entry.kind, EntryKind::Symlink);
-        assert!(entry.symlink_target.is_some());
+        assert_eq!(entry.size, target.as_os_str().len() as u64);
     }
 
     #[test]
@@ -343,12 +349,27 @@ mod tests {
     }
 
     #[test]
-    fn entry_for_path_follow_chain_empty_on_broken_link() {
+    fn entry_for_path_follow_chain_records_break_on_broken_link() {
         let dir = tempdir().unwrap();
         let link = dir.path().join("dangling");
         symlink(dir.path().join("nope"), &link).unwrap();
         let entry = entry_for_path(&link).unwrap();
-        assert!(entry.follow_chain.is_empty());
+        assert_eq!(entry.follow_chain, vec![dir.path().join("nope")]);
+    }
+
+    #[test]
+    fn entry_for_path_follow_chain_records_multi_hop_break() {
+        // a → b → c with c absent: the chain walks to the break so the name can
+        // show every hop with the unresolved tail flagged.
+        let dir = tempdir().unwrap();
+        symlink("c", dir.path().join("b")).unwrap();
+        symlink("b", dir.path().join("a")).unwrap();
+        let entry = entry_for_path(&dir.path().join("a")).unwrap();
+        assert_eq!(entry.kind, EntryKind::Symlink);
+        assert_eq!(
+            entry.follow_chain,
+            vec![PathBuf::from("b"), PathBuf::from("c")]
+        );
     }
 
     #[test]

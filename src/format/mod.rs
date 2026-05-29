@@ -78,13 +78,23 @@ pub fn build_row<D: UserDirectory>(
     umask: u32,
 ) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
+    let broken = entry.is_broken_link();
     let (size, size_width) = match entry.kind {
         EntryKind::CharDevice | EntryKind::BlockDevice => size::format_rdev(entry.rdev),
         _ => size::format_size(entry.size, dim),
     };
+    // A broken link's size and mode describe the link inode, not a file, so dim
+    // them — the `l` type char and the colored target already flag the row.
+    // Dimming the size string keeps `size_width` (the visible digit count)
+    // correct, since the dim escapes are zero-width.
+    let size = if broken {
+        format!("{dim}{size}{}", dim.render_reset())
+    } else {
+        size
+    };
     let kind = entry.kind.type_char();
     let mode = perms::format_perms(entry.mode);
-    let dim_mode = perms::is_default(entry.kind, entry.mode, umask);
+    let dim_mode = broken || perms::is_default(entry.kind, entry.mode, umask);
     let dim_group = owners.gid_is_primary(entry.uid, entry.gid);
     Row {
         kind,
@@ -99,7 +109,7 @@ pub fn build_row<D: UserDirectory>(
         size_width,
         mtime: time::format_time_styled(entry.mtime, now, dim),
         git: None,
-        name: name::format_name(palette, entry, false, false),
+        name: name::format_name(palette, entry, false),
     }
 }
 
@@ -208,7 +218,6 @@ mod tests {
             size: 1234,
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: None,
             dev: 0,
             ino: 0,
             follow_chain: Vec::new(),
@@ -324,6 +333,29 @@ mod tests {
         assert_eq!(row.kind, 'd');
         assert_eq!(row.mode, "755");
         assert!(row.dim_mode);
+    }
+
+    #[test]
+    fn build_row_dims_mode_and_size_for_broken_symlink() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let mut e = entry("dangling");
+        e.kind = EntryKind::Symlink;
+        e.mode = 0o120_777;
+        e.size = 9;
+        e.follow_chain = vec![PathBuf::from("builds/v9")];
+        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+        assert_eq!(row.kind, 'l');
+        assert!(row.dim_mode, "broken link mode describes the link, dim it");
+        // The size describes the link inode (target-path length), not a file, so
+        // it's dim-wrapped — yet `size_width` still counts only the visible digit.
+        let dim_open = format!("{}", Style::new().effects(Effects::DIMMED));
+        assert!(
+            row.size.starts_with(&dim_open) && row.size.contains('9'),
+            "broken link size should be dim-wrapped: {:?}",
+            row.size
+        );
+        assert_eq!(row.size_width, 1);
     }
 
     #[test]

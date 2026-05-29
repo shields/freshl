@@ -182,7 +182,6 @@ mod tests {
             size: 0,
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: None,
             dev: 0,
             ino: 0,
             follow_chain: Vec::new(),

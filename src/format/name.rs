@@ -27,17 +27,13 @@ use crate::format::palette::Palette;
 /// rendering with the right colour on a terminal. Symlinks render as
 /// `name → target`, walking the full chain on multi-hop links. The
 /// link/intermediate names render in the `ln` symlink color, the arrows
-/// dim, and the final target in its natural per-kind color. Broken symlinks
-/// fall back to the same arrow form, with the missing target in `mi` (or
-/// red).
+/// dim, and the final target in its natural per-kind color. A broken link
+/// walks the same chain up to the break — the link side renders in the orphan
+/// (`or`) color and the unresolved final hop in `mi` (or red when `mi` is
+/// unset).
 #[must_use]
-pub fn format_name(
-    palette: &Palette,
-    entry: &Entry,
-    dim_if_ignored: bool,
-    target_missing: bool,
-) -> Vec<u8> {
-    let base = palette.style_for(entry, target_missing);
+pub fn format_name(palette: &Palette, entry: &Entry, dim_if_ignored: bool) -> Vec<u8> {
+    let base = palette.style_for(entry);
     let dim = Style::new().effects(Effects::DIMMED);
     let red = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
     let overlay = |s: Style| {
@@ -58,41 +54,43 @@ pub fn format_name(
         .sum();
     let mut out = Vec::with_capacity(entry.name.len() + 32 + chain_bytes);
 
+    let segment = |out: &mut Vec<u8>, style: Style, bytes: &[u8]| {
+        let _ = write!(out, "{style}");
+        out.extend_from_slice(bytes);
+        let _ = write!(out, "{}", style.render_reset());
+    };
+
     if let Some((final_target, hops)) = entry.follow_chain.split_last() {
-        // entry.kind reflects the resolved target's kind, so `name_style`
-        // is already the target's per-kind style. Ask the palette
-        // separately for the `ln` style so the left side of the chain
-        // (link name + intermediates) renders as symlinks.
-        let chain_style = overlay(palette.style_for_symlink());
-        let segment = |out: &mut Vec<u8>, style: Style, bytes: &[u8]| {
-            let _ = write!(out, "{style}");
-            out.extend_from_slice(bytes);
-            let _ = write!(out, "{}", style.render_reset());
+        // One renderer for both resolved and broken links. A resolved link is
+        // reclassified to its target's kind, so `name_style` is the target's
+        // per-kind style and the link side (name + intermediates) takes `ln`.
+        // A broken link keeps its `Symlink` kind, so `name_style` is the orphan
+        // (`or`) style for the link side and the unresolved final hop takes
+        // `mi` (or red when `mi` is unset).
+        let broken = entry.is_broken_link();
+        let link_style = if broken {
+            name_style
+        } else {
+            overlay(palette.style_for_symlink())
         };
-        segment(&mut out, chain_style, entry.name.as_bytes());
+        let final_style = if broken {
+            overlay(palette.style_for_missing_target().unwrap_or(red))
+        } else {
+            name_style
+        };
+        segment(&mut out, link_style, entry.name.as_bytes());
         for intermediate in hops {
             segment(&mut out, dim, " → ".as_bytes());
-            segment(&mut out, chain_style, intermediate.as_os_str().as_bytes());
+            segment(&mut out, link_style, intermediate.as_os_str().as_bytes());
         }
         segment(&mut out, dim, " → ".as_bytes());
-        segment(&mut out, name_style, final_target.as_os_str().as_bytes());
+        segment(&mut out, final_style, final_target.as_os_str().as_bytes());
         return out;
     }
 
-    let _ = write!(out, "{name_style}");
-    out.extend_from_slice(entry.name.as_bytes());
-    let _ = write!(out, "{}", name_style.render_reset());
-
-    if let Some(target) = &entry.symlink_target {
-        // Broken-symlink fallback: stat(2) failed in collect, so the row
-        // kept the lstat representation; missing target takes `mi`.
-        let _ = write!(out, " {dim}→{} ", dim.render_reset());
-        let style = palette.style_for_missing_target().unwrap_or(red);
-        let _ = write!(out, "{style}");
-        out.extend_from_slice(target.as_os_str().as_bytes());
-        let _ = write!(out, "{}", style.render_reset());
-    }
-
+    // No chain: a plain file/dir, or the rare broken link whose `readlink`
+    // itself failed (rendered as the bare name in the orphan style).
+    segment(&mut out, name_style, entry.name.as_bytes());
     out
 }
 
@@ -117,7 +115,6 @@ mod tests {
             size: 0,
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: None,
             dev: 0,
             ino: 0,
             follow_chain: Vec::new(),
@@ -132,7 +129,7 @@ mod tests {
     fn formats_plain_file_name() {
         let palette = Palette::empty();
         let e = entry("hello", EntryKind::RegularFile);
-        let bytes = format_name(&palette, &e, false, false);
+        let bytes = format_name(&palette, &e, false);
         assert!(as_lossy(&bytes).contains("hello"));
     }
 
@@ -140,8 +137,8 @@ mod tests {
     fn broken_symlink_renders_arrow_with_red_target_when_mi_unset() {
         let palette = Palette::empty();
         let mut e = entry("link", EntryKind::Symlink);
-        e.symlink_target = Some(PathBuf::from("nowhere"));
-        let s = as_lossy(&format_name(&palette, &e, false, true));
+        e.follow_chain = vec![PathBuf::from("nowhere")];
+        let s = as_lossy(&format_name(&palette, &e, false));
         assert!(s.contains("link"));
         assert!(s.contains('→'));
         assert!(s.contains("nowhere"));
@@ -154,18 +151,37 @@ mod tests {
     fn broken_symlink_target_uses_mi_when_palette_sets_it() {
         let palette = Palette::from_string("mi=01;33");
         let mut e = entry("link", EntryKind::Symlink);
-        e.symlink_target = Some(PathBuf::from("nowhere"));
-        let s = as_lossy(&format_name(&palette, &e, false, true));
+        e.follow_chain = vec![PathBuf::from("nowhere")];
+        let s = as_lossy(&format_name(&palette, &e, false));
         assert!(s.contains("33"), "expected mi yellow on target: {s}");
         assert!(!s.contains("31"), "freshl red should not appear: {s}");
+    }
+
+    #[test]
+    fn broken_multi_hop_chain_renders_full_path_with_red_tail() {
+        // a → mid → gone, with `gone` missing: the whole chain renders and only
+        // the unresolved tail takes red (mi unset here).
+        let palette = Palette::empty();
+        let mut e = entry("a", EntryKind::Symlink);
+        e.follow_chain = vec![PathBuf::from("mid"), PathBuf::from("gone")];
+        let s = as_lossy(&format_name(&palette, &e, false));
+        let a = s.find('a').expect("name missing");
+        let mid = s.find("mid").expect("intermediate missing");
+        let gone = s.find("gone").expect("tail missing");
+        assert!(
+            a < mid && mid < gone,
+            "expected forward order a → mid → gone: {s}"
+        );
+        assert_eq!(s.matches('→').count(), 2, "two arrows for two hops: {s}");
+        assert!(s.contains("31"), "unresolved tail should be red: {s}");
     }
 
     #[test]
     fn ignored_files_get_dim_style() {
         let palette = Palette::empty();
         let e = entry("ignored", EntryKind::RegularFile);
-        let dim = format_name(&palette, &e, true, false);
-        let plain = format_name(&palette, &e, false, false);
+        let dim = format_name(&palette, &e, true);
+        let plain = format_name(&palette, &e, false);
         assert_ne!(plain, dim);
     }
 
@@ -175,7 +191,7 @@ mod tests {
         // base style instead of replacing it.
         let palette = Palette::from_string("di=01;34");
         let e = entry("d", EntryKind::Directory);
-        let dim = as_lossy(&format_name(&palette, &e, true, false));
+        let dim = as_lossy(&format_name(&palette, &e, true));
         assert!(
             dim.contains("34"),
             "blue fg should survive dim overlay: {dim}"
@@ -188,7 +204,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("CLAUDE.md", EntryKind::RegularFile);
         e.follow_chain = vec![PathBuf::from("AGENTS.md")];
-        let s = as_lossy(&format_name(&palette, &e, false, false));
+        let s = as_lossy(&format_name(&palette, &e, false));
         // Each segment carries its own style with explicit resets, so the
         // arrow and target are sandwiched between ANSI control sequences
         // rather than being a contiguous substring. Spot-check order.
@@ -204,7 +220,7 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("top", EntryKind::RegularFile);
         e.follow_chain = vec![PathBuf::from("mid"), PathBuf::from("target")];
-        let s = as_lossy(&format_name(&palette, &e, false, false));
+        let s = as_lossy(&format_name(&palette, &e, false));
         let prefix_pos = s.find("top").expect("name missing");
         let mid_pos = s.find("mid").expect("intermediate missing");
         let target_pos = s.find("target").expect("target missing");
@@ -222,7 +238,7 @@ mod tests {
         let palette = Palette::from_string("ln=01;36");
         let mut e = entry("CLAUDE.md", EntryKind::RegularFile);
         e.follow_chain = vec![PathBuf::from("AGENTS.md")];
-        let s = as_lossy(&format_name(&palette, &e, false, false));
+        let s = as_lossy(&format_name(&palette, &e, false));
         assert!(s.contains("36"), "symlink cyan SGR missing: {s}");
     }
 
@@ -242,12 +258,11 @@ mod tests {
             size: 0,
             rdev: 0,
             mtime: SystemTime::UNIX_EPOCH,
-            symlink_target: None,
             dev: 0,
             ino: 0,
             follow_chain: Vec::new(),
         };
-        let bytes = format_name(&palette, &e, false, false);
+        let bytes = format_name(&palette, &e, false);
         // The raw byte 0xFF must appear in the output verbatim, not as U+FFFD.
         assert!(bytes.windows(raw.len()).any(|w| w == raw.as_slice()));
     }

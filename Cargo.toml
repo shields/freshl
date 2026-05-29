@@ -13,12 +13,17 @@
 # limitations under the License.
 
 [package]
+# `version` and `publish` are intentionally omitted; `make publish` injects both
+# into a throwaway copy of HEAD via `gitcalver prepare-publish`. Cargo's default
+# version "0.0.0" is fine for local builds.
 name = "freshl"
 edition = "2024"
 rust-version = "1.95"
-description = "Modern ls replacement with git awareness and ISO 8601 UTC timestamps"
-publish = false
+description = "Modern ls replacement with git awareness"
 repository = "https://github.com/shields/freshl"
+documentation = "https://docs.rs/freshl"
+readme = "README.md"
+license = "Apache-2.0"
 keywords = ["cli", "ls", "filesystem", "git"]
 categories = ["command-line-utilities", "filesystem"]
 

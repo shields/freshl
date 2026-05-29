@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-.PHONY: build install test lint fmt coverage run clean
+.PHONY: build install test lint fmt coverage run clean publish publish-dry-run
 
 # Override to pin to a specific nightly date (e.g. nightly-2026-04-12) when a
 # bleeding-edge nightly destabilises llvm-cov instrumentation.
@@ -50,3 +50,19 @@ run:
 
 clean:
 	cargo clean
+
+# Publish to crates.io. The committed Cargo.toml omits `version` and `publish`;
+# `gitcalver prepare-publish` injects both into a throwaway copy of HEAD so the
+# source tree stays version-less. Requires `gitcalver` on PATH
+# (`cargo install gitcalver`). Refuses a dirty tree or off-(default-)branch HEAD.
+publish publish-dry-run:
+	@set -e; \
+	src=$$(pwd); \
+	tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	git archive HEAD | tar -x -C "$$tmp"; \
+	ver=$$(gitcalver prepare-publish --prefix 0. --manifest "$$tmp/Cargo.toml" --source-dir "$$src"); \
+	$(if $(findstring dry,$@),echo "Would publish version $$ver";) \
+	cd "$$tmp"; \
+	CARGO_TARGET_DIR="$$src/target" cargo check --quiet; \
+	CARGO_TARGET_DIR="$$src/target" cargo publish $(if $(findstring dry,$@),--dry-run,)

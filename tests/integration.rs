@@ -169,6 +169,41 @@ fn git_repo_marks_untracked_and_ignored() {
 }
 
 #[test]
+fn git_repo_marks_internally_ignored_dir() {
+    // uv/ruff create dirs (`.venv`, `.ruff_cache`) whose contents are ignored
+    // by a `.gitignore` of `*` *inside* the dir. git treats the whole dir as
+    // ignored; freshl must show `·`, not `?`. The dir itself matches no exclude
+    // rule, so the status walk's directory collapse is the only thing that can
+    // catch it. A sibling dir with genuinely untracked content still shows `?`.
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::write(dir.path().join("kept"), b"hello").unwrap();
+    run_git(dir.path(), &["add", "kept"]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+
+    let venv = dir.path().join(".venv");
+    fs::create_dir(&venv).unwrap();
+    fs::write(venv.join(".gitignore"), b"*\n").unwrap();
+    fs::write(venv.join("lib"), b"x").unwrap();
+
+    let untracked = dir.path().join("untracked_dir");
+    fs::create_dir(&untracked).unwrap();
+    fs::write(untracked.join("a"), b"x").unwrap();
+
+    let (code, out, _err) = run_paths(&[dir.path()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(
+        out.lines().any(|l| l.contains(".venv") && l.contains('·')),
+        "expected · for internally-ignored .venv in: {out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.contains("untracked_dir") && l.contains('?')),
+        "expected ? for untracked_dir in: {out}"
+    );
+}
+
+#[test]
 fn git_repo_marks_modified_in_worktree() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());

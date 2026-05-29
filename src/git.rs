@@ -495,12 +495,22 @@ fn collect_statuses(
 
     let platform = repo
         .status(gix::progress::Discard)?
-        // Collapsed: an entirely-untracked or -ignored directory is emitted as a
-        // single entry; files within are absent from the map and inherit via
+        // Collapse a whole-untracked or whole-ignored directory into one entry;
+        // files within are absent from the map and inherit via
         // `Snapshot::lookup`'s ancestor walk.
+        //
+        // Both untracked and ignored must collapse. A directory ignored only by
+        // its own `.gitignore` (e.g. uv's `.venv`, ruff's `.ruff_cache` — each
+        // holding a `.gitignore` of `*`) matches no exclude rule itself, so gix
+        // classifies it untracked and recurses in. Only directory collapse then
+        // folds its all-ignored contents back into a single IGNORED entry;
+        // `EmissionMode::Matching` would instead emit the individual ignored
+        // files and leave the directory row to fall through to UNTRACKED.
         .untracked_files(gix::status::UntrackedFiles::Collapsed)
         .index_worktree_rewrites(gix::diff::Rewrites::default())
-        .dirwalk_options(|opts| opts.emit_ignored(Some(gix::dir::walk::EmissionMode::Matching)));
+        .dirwalk_options(|opts| {
+            opts.emit_ignored(Some(gix::dir::walk::EmissionMode::CollapseDirectory))
+        });
 
     // Empty pathspec: always walk the full repo. A non-empty pathspec
     // forces gix to descend into gitignored subtrees (e.g. `node_modules/`),
@@ -1007,6 +1017,28 @@ mod tests {
         let snap = r.snapshot();
         assert_eq!(
             snap.lookup(&r.root().join("ig/inside")),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn lookup_marks_dir_ignored_when_internal_gitignore_ignores_all() {
+        // uv/ruff write a `.gitignore` of `*` into the dirs they create
+        // (`.venv`, `.ruff_cache`); every entry inside is ignored, so git
+        // treats the whole directory as ignored. The directory itself matches
+        // no exclude rule, so only the status walk's directory collapse can
+        // report it — the cold-path exclude check on the directory can't.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.write(".venv/.gitignore", b"*\n").write(".venv/lib", b"x");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&r.root().join(".venv"), true),
+            PorcelainCode::IGNORED,
+        );
+        // Descendants still inherit IGNORED via the ancestor walk.
+        assert_eq!(
+            snap.lookup(&r.root().join(".venv/lib")),
             PorcelainCode::IGNORED,
         );
     }

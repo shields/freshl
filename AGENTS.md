@@ -24,5 +24,5 @@ those by default.
 
 Before every commit:
 
-1. Run `/simplify` on the staged changes.
+1. Run `/code-review --fix` on the staged changes.
 2. Submit through LGTMCP (`review_and_commit`).

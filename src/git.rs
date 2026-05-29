@@ -506,10 +506,19 @@ fn collect_statuses(
         // folds its all-ignored contents back into a single IGNORED entry;
         // `EmissionMode::Matching` would instead emit the individual ignored
         // files and leave the directory row to fall through to UNTRACKED.
+        //
+        // `emit_collapsed(OnStatusMismatch)` re-emits a collapsed directory's
+        // status-mismatched children. Without it, an untracked parent that
+        // collapses swallows a wholly-ignored subdir, which then inherits the
+        // parent's UNTRACKED; with it, the subdir is re-emitted as IGNORED —
+        // matching `git status --ignored`'s dual `?? parent/` + `!! parent/sub/`.
         .untracked_files(gix::status::UntrackedFiles::Collapsed)
         .index_worktree_rewrites(gix::diff::Rewrites::default())
         .dirwalk_options(|opts| {
             opts.emit_ignored(Some(gix::dir::walk::EmissionMode::CollapseDirectory))
+                .emit_collapsed(Some(
+                    gix::dir::walk::CollapsedEntriesEmissionMode::OnStatusMismatch,
+                ))
         });
 
     // Empty pathspec: always walk the full repo. A non-empty pathspec
@@ -1040,6 +1049,37 @@ mod tests {
         assert_eq!(
             snap.lookup(&r.root().join(".venv/lib")),
             PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn lookup_marks_ignored_subdir_inside_untracked_dir() {
+        // A wholly-ignored dir nested inside an *untracked* dir: gix collapses
+        // the untracked parent and would swallow the ignored subtree unless
+        // emit_collapsed re-emits the status-mismatched child. git agrees —
+        // `git status --ignored` shows both `?? newdir/` and `!! newdir/cache/`.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.write("newdir/note", b"x") // genuinely untracked
+            .write("newdir/cache/.gitignore", b"*\n")
+            .write("newdir/cache/data", b"x");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&r.root().join("newdir/cache"), true),
+            PorcelainCode::IGNORED,
+        );
+        assert_eq!(
+            snap.lookup(&r.root().join("newdir/cache/data")),
+            PorcelainCode::IGNORED,
+        );
+        // The untracked parent and its loose file stay UNTRACKED.
+        assert_eq!(
+            snap.lookup(&r.root().join("newdir/note")),
+            PorcelainCode::UNTRACKED,
+        );
+        assert_eq!(
+            snap.display_code_for(&r.root().join("newdir"), true),
+            PorcelainCode::UNTRACKED,
         );
     }
 

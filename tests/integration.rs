@@ -204,6 +204,39 @@ fn git_repo_marks_internally_ignored_dir() {
 }
 
 #[test]
+fn git_repo_marks_ignored_subdir_inside_untracked_dir() {
+    // A wholly-ignored dir (`.gitignore` of `*`) nested inside an *untracked*
+    // dir. git reports both `?? newdir/` and `!! newdir/cache/`; listing the
+    // untracked dir, freshl must show `·` for the ignored `cache` and `?` for a
+    // loose untracked file.
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::write(dir.path().join("seed"), b"x").unwrap();
+    run_git(dir.path(), &["add", "seed"]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+
+    let newdir = dir.path().join("newdir");
+    fs::create_dir(&newdir).unwrap();
+    fs::write(newdir.join("note"), b"x").unwrap(); // genuinely untracked
+
+    let cache = newdir.join("cache");
+    fs::create_dir(&cache).unwrap();
+    fs::write(cache.join(".gitignore"), b"*\n").unwrap();
+    fs::write(cache.join("data"), b"x").unwrap();
+
+    let (code, out, _err) = run_paths(&[newdir.as_path()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(
+        out.lines().any(|l| l.contains("cache") && l.contains('·')),
+        "expected · for ignored cache inside untracked newdir in: {out}"
+    );
+    assert!(
+        out.lines().any(|l| l.contains("note") && l.contains('?')),
+        "expected ? for loose untracked note in: {out}"
+    );
+}
+
+#[test]
 fn git_repo_marks_modified_in_worktree() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());

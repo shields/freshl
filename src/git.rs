@@ -196,27 +196,40 @@ impl Snapshot {
         if rel.starts_with(".git") {
             return PorcelainCode::BLANK;
         }
-        if let Some(code) = self.statuses.get(rel).copied() {
+        // Positive index proof: `rel` (or a descendant) is in the index, so it
+        // belongs to the tracked tree. gix's worktree walk can collapse a
+        // directory whose *on-disk* content is wholly untracked into a single
+        // UNTRACKED/IGNORED entry even when the index still tracks a file there
+        // that was deleted from the worktree. That collapsed entry — on `rel`
+        // itself, or inherited from a collapsed ancestor — must not override the
+        // index proof, or the directory would render `?`/`·`, violating the
+        // CLEAN-requires-proof invariant. Resolve it to CLEAN; `display_code_for`
+        // then refines it to DIRTY_SUBTREE because the subtree has changes.
+        let tracked_prefix = self.tracked_prefixes.contains(rel);
+        if let Some(code) = self.statuses.get(rel).copied()
+            && !(tracked_prefix && is_collapsed_dir(code))
+        {
             return code;
         }
-        for ancestor in iter_ancestors(rel) {
-            if let Some(code) = self.statuses.get(ancestor).copied()
-                && (code == PorcelainCode::UNTRACKED || code == PorcelainCode::IGNORED)
-            {
-                return code;
-            }
-            // A submodule gitlink ancestor means the parent repo delegates
-            // this subtree to the submodule — classify descendants as CLEAN
-            // so the listing doesn't drown in spurious `?` glyphs.
-            if self.submodule_roots.contains(ancestor) {
-                return PorcelainCode::CLEAN;
+        if !tracked_prefix {
+            for ancestor in iter_ancestors(rel) {
+                if let Some(code) = self.statuses.get(ancestor).copied()
+                    && (code == PorcelainCode::UNTRACKED || code == PorcelainCode::IGNORED)
+                {
+                    return code;
+                }
+                // A submodule gitlink ancestor means the parent repo delegates
+                // this subtree to the submodule — classify descendants as CLEAN
+                // so the listing doesn't drown in spurious `?` glyphs.
+                if self.submodule_roots.contains(ancestor) {
+                    return PorcelainCode::CLEAN;
+                }
             }
         }
-        // The status walk had no entry for this path. Resolve by positive
-        // proof: CLEAN requires the path (or a descendant) to be in the
-        // index; otherwise it's IGNORED (matches an exclude rule) or
-        // UNTRACKED.
-        if self.tracked_prefixes.contains(rel) {
+        // The status walk had no overriding entry for this path. Resolve by
+        // positive proof: CLEAN requires the path (or a descendant) to be in the
+        // index; otherwise it's IGNORED (matches an exclude rule) or UNTRACKED.
+        if tracked_prefix {
             return PorcelainCode::CLEAN;
         }
         if self.path_is_excluded(rel, kind_resolver()) {
@@ -525,6 +538,14 @@ fn compute_dirty_ancestors(
     out
 }
 
+/// Whether `code` is a collapsed-directory status (`UNTRACKED`/`IGNORED`) from
+/// gix's worktree walk, as opposed to a concrete change. Only these are subject
+/// to being overridden by positive index proof in `lookup_rel`; a real change
+/// code (modified, deleted, …) on a tracked file is authoritative.
+fn is_collapsed_dir(code: PorcelainCode) -> bool {
+    code == PorcelainCode::UNTRACKED || code == PorcelainCode::IGNORED
+}
+
 // Yields strict ancestors of `rel`, including the empty path (which represents
 // the repository root after `relativize`). The repository root itself must
 // appear in `dirty_ancestors` so `freshl -d <root>` flags a dirty tree; the
@@ -827,6 +848,47 @@ mod tests {
 
     fn status_at(snap: &Snapshot, rel: &str) -> PorcelainCode {
         snap.lookup(&snap.root.join(rel))
+    }
+
+    // A directory whose tracked file was deleted from the worktree, and whose
+    // remaining on-disk content is untracked, gets collapsed to UNTRACKED by
+    // gix's dirwalk. It is still a tracked prefix (the file is in the index),
+    // so it must render as a dirty subtree, not `?`. Regression for a
+    // divergence the git-CLI differential test surfaced.
+    #[test]
+    fn dir_with_deleted_tracked_file_and_untracked_content_is_dirty_subtree() {
+        let r = TestRepo::new();
+        r.write("d0/f1", b"base\n").commit(&["d0/f1"], "base");
+        r.remove_file("d0/f1");
+        r.write("d0/d1/f0", b"x\n"); // untracked, makes d0 look untracked on disk
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&snap.root.join("d0"), true),
+            PorcelainCode::DIRTY_SUBTREE,
+            "a directory that still tracks a (deleted) file is a dirty subtree, not untracked"
+        );
+        // The genuinely untracked leaf is unaffected.
+        assert_eq!(status_at(&snap, "d0/d1/f0"), PorcelainCode::UNTRACKED);
+    }
+
+    // The same divergence one level deeper: the tracked file sits under an
+    // intermediate directory, so `d0` collapses to UNTRACKED while the tracked
+    // prefix that needs protecting is the *ancestor-inherited* `d0/d1`.
+    #[test]
+    fn nested_tracked_prefix_under_collapsed_untracked_is_dirty_subtree() {
+        let r = TestRepo::new();
+        r.write("d0/d1/f1", b"base\n").commit(&["d0/d1/f1"], "base");
+        r.remove_file("d0/d1/f1");
+        r.write("d0/u", b"x\n"); // untracked sibling collapses d0 on disk
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&snap.root.join("d0"), true),
+            PorcelainCode::DIRTY_SUBTREE
+        );
+        assert_eq!(
+            snap.display_code_for(&snap.root.join("d0/d1"), true),
+            PorcelainCode::DIRTY_SUBTREE
+        );
     }
 
     #[test]
@@ -1169,6 +1231,77 @@ mod tests {
         assert_eq!(
             snap.display_code_for(&r.root().join("newdir"), true),
             PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn display_ignored_for_subdir_with_only_root_ignored_files() {
+        // A subdirectory whose only content is files ignored by a *root*
+        // `.gitignore` rule (not the dir's own `.gitignore`, not a `dir/` rule)
+        // renders `·`: gix collapses the wholly-ignored directory, matching
+        // `git status`, which reports every file beneath it as `!`. This is the
+        // "dir whose only content is ignored" backlog case from docs/edge-cases.md.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"*.log\n")
+            .write("seed", b"x")
+            .commit(&["."], "init");
+        r.write("a/x.log", b"1\n").write("a/y.log", b"2\n");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&r.root().join("a"), true),
+            PorcelainCode::IGNORED,
+        );
+        assert_eq!(
+            snap.lookup(&r.root().join("a/x.log")),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn display_untracked_for_subdir_mixing_ignored_and_untracked() {
+        // Mixed content — one ignored file and one genuinely untracked file —
+        // resolves to `?`, not `·`: the untracked file is content git would
+        // pick up, so untracked wins. Mirrors `git status` showing both
+        // `? a/y.txt` and `! a/x.log`.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"*.log\n")
+            .write("seed", b"x")
+            .commit(&["."], "init");
+        r.write("a/x.log", b"1\n").write("a/y.txt", b"2\n");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&r.root().join("a"), true),
+            PorcelainCode::UNTRACKED,
+        );
+        assert_eq!(
+            snap.lookup(&r.root().join("a/x.log")),
+            PorcelainCode::IGNORED,
+        );
+        assert_eq!(
+            snap.lookup(&r.root().join("a/y.txt")),
+            PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn display_clean_for_tracked_subdir_holding_an_ignored_file() {
+        // A tracked directory keeps its `○` when it also holds an ignored file:
+        // an ignored file is not a change, so the subtree stays clean. Touch the
+        // tracked file and the directory becomes `⋯` — the ignored sibling still
+        // doesn't count toward the dirty subtree.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"*.log\n")
+            .write("a/t", b"tracked\n")
+            .commit(&["."], "init");
+        r.write("a/x.log", b"1\n");
+        assert_eq!(
+            r.snapshot().display_code_for(&r.root().join("a"), true),
+            PorcelainCode::CLEAN,
+        );
+        r.write("a/t", b"changed\n");
+        assert_eq!(
+            r.snapshot().display_code_for(&r.root().join("a"), true),
+            PorcelainCode::DIRTY_SUBTREE,
         );
     }
 

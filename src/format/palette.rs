@@ -386,6 +386,24 @@ mod tests {
     }
 
     #[test]
+    fn malformed_ls_colors_does_not_panic_and_keeps_valid_rules() {
+        // freshl delegates LS_COLORS parsing to the infallible `lscolors` crate.
+        // Garbage tokens — empty keys, missing `=`, a non-numeric SGR value,
+        // stray separators — must be skipped without panicking, and a
+        // well-formed rule in the same string must still take effect (the
+        // parser doesn't bail on the whole value). Exact handling of exotic
+        // codes is lscolors' contract, not freshl's; the only promise here is
+        // "don't crash on hostile env input, and don't let garbage shadow a
+        // valid rule".
+        let palette = Palette::from_string(":=:bogus:*.rs=not-a-number:::di=1;34:x=");
+        let dir = palette.style_for(&entry("d", EntryKind::Directory));
+        assert!(
+            format!("{dir}").contains("34"),
+            "a valid `di` rule must survive the surrounding garbage: {dir:?}"
+        );
+    }
+
+    #[test]
     fn orphan_symlink_falls_back_to_ln_when_or_unset() {
         // Without `or`, lscolors' own fallback chain hands OrphanedSymbolicLink
         // off to SymbolicLink — a broken link should still get the `ln` color.

@@ -121,6 +121,21 @@ mod tests {
     }
 
     #[test]
+    fn format_size_handles_a_size_near_u64_max() {
+        // 20 digits (`u64::MAX`) is far past every other tested width: it must
+        // format without overflow or panic, render every digit, and report the
+        // visible width. Backs the "Near `u64::MAX`" row in docs/edge-cases.md.
+        let max = u64::MAX.to_string(); // 20 digits
+        let (s, w) = format_size(u64::MAX, dim());
+        assert_eq!(w, max.len());
+        assert_eq!(strip(&s), max);
+        let d = dim();
+        // head = width % 6 = 20 % 6 = 2 leading digits; the rest dim as one run.
+        let (head, tail) = max.split_at(2);
+        assert_eq!(s, format!("{head}{d}{tail}{}", d.render_reset()));
+    }
+
+    #[test]
     fn format_rdev_emits_lowercase_hex_with_0x_prefix() {
         let (s, w) = format_rdev(0x0300_0002);
         assert_eq!(s, "0x3000002");

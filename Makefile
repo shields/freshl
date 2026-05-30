@@ -42,8 +42,17 @@ fmt:
 
 # cargo-llvm-cov auto-sets cfg(coverage_nightly) on nightly; passing --cfg
 # explicitly is rejected. Do not add --cfg coverage_nightly here.
+#
+# The 100% gate is on *production* code. Integration-test files under tests/
+# (the generative property/differential harness) are excluded from the report
+# via --ignore-filename-regex: they still run and exercise src/, but their own
+# lines aren't held to the line gate — a random generator can't be expected to
+# execute every branch on a fixed seed. Inline `#[cfg(test)]` modules in src/
+# stay measured (they're deterministic and already fully covered). The heaviest
+# generators additionally gate themselves out of the coverage *build* with
+# `#![cfg(not(coverage_nightly))]` to keep the pre-commit hook fast.
 coverage:
-	cargo +$(NIGHTLY) llvm-cov --fail-under-lines 100
+	cargo +$(NIGHTLY) llvm-cov --fail-under-lines 100 --ignore-filename-regex '(^|/)tests/'
 
 run:
 	cargo run --release --

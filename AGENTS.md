@@ -20,6 +20,15 @@ Project conventions live in
 [`shields/right-answers`](https://github.com/shields/right-answers) — follow
 those by default.
 
+## Filesystem races
+
+`freshl` only reads and displays the filesystem — it never writes, changes
+permissions, or performs a privileged check-then-act sequence, so it has no
+security-sensitive TOCTOU surface. Don't guard against TOCTOU. If the filesystem
+changes between when we stat an entry and when we render it, the listing simply
+reflects a different point in time; that staleness is inherent to any listing
+tool, so the resulting behavior is unspecified rather than a bug.
+
 ## Commit workflow
 
 Before every commit:

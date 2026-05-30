@@ -25,8 +25,8 @@ A modern replacement for `ls`.
 
 Unlike `ls`, `-S` and `-t` put the largest/newest files at the bottom of the
 output. Also unlike `ls`, you can use `-r` again to double-reverse: `-rt` will
-output the oldest files last. `-rrrr` will have no effect but is amusingly
-piratical.
+output the oldest files last. `-rr` or `-rrrr` will have no effect, but you can
+`ls` like a pirate.
 
 `-R` ignores gitignored and dotfile dirs, unless with `-u` or `-uu` (à la
 `ripgrep`).

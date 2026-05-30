@@ -276,6 +276,27 @@ fn git_repo_empty_dir_renders_blank_not_untracked() {
 }
 
 #[test]
+fn git_repo_empty_untracked_subtree_does_not_dirty_parent() {
+    // `freshl -d <repo>` on a clean repo whose only untracked content is an
+    // empty directory tree must show the parent clean (○), not a dirty subtree
+    // (⋯) — git itself reports nothing for empty directories.
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::write(dir.path().join("seed"), b"x").unwrap();
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+    fs::create_dir_all(dir.path().join("x/y/z")).unwrap();
+
+    let (code, out, _err) = run_args(&["-d", dir.path().to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(
+        !out.contains('⋯'),
+        "empty untracked subtree must not mark parent as a dirty subtree: {out}"
+    );
+    assert!(out.contains('○'), "clean repo root should render ○: {out}");
+}
+
+#[test]
 fn git_repo_marks_modified_in_worktree() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());

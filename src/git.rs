@@ -467,7 +467,7 @@ fn assemble_snapshot(
         )
         .ok()?
         .detach();
-    let dirty_ancestors = compute_dirty_ancestors(&statuses);
+    let dirty_ancestors = compute_dirty_ancestors(&statuses, &workdir);
     let (tracked_prefixes, submodule_roots) = collect_index_prefixes(&index);
     Some(Snapshot {
         root: workdir,
@@ -502,10 +502,20 @@ fn collect_index_prefixes(index: &gix::index::File) -> (HashSet<PathBuf>, HashSe
     (prefixes, submodules)
 }
 
-fn compute_dirty_ancestors(statuses: &HashMap<PathBuf, PorcelainCode>) -> HashSet<PathBuf> {
+fn compute_dirty_ancestors(
+    statuses: &HashMap<PathBuf, PorcelainCode>,
+    workdir: &Path,
+) -> HashSet<PathBuf> {
     let mut out = HashSet::new();
     for (path, code) in statuses {
         if *code == PorcelainCode::CLEAN || *code == PorcelainCode::IGNORED {
+            continue;
+        }
+        // An empty untracked directory renders blank — git tracks nothing in
+        // it — so it must not flag its ancestors as a dirty subtree. (gix's
+        // dirwalk reports some empty untracked dirs as entries.) Only a real
+        // empty directory is skipped; an untracked file or symlink is content.
+        if *code == PorcelainCode::UNTRACKED && is_empty_dir(&workdir.join(path)) {
             continue;
         }
         for ancestor in iter_ancestors(path) {
@@ -552,6 +562,19 @@ fn subtree_contains_file(dir: &Path) -> bool {
         }
     }
     false
+}
+
+/// `true` if `abs` is a real (non-symlinked) directory with no file anywhere
+/// beneath it. Keeps empty untracked directories — which render blank, since
+/// git tracks nothing in them — from marking their ancestors as a dirty
+/// subtree. `symlink_metadata` (not `metadata`) so a symlink reports `false`:
+/// git stores a symlink as content, so it should still flag its ancestors.
+///
+/// [`Snapshot::display_code_for`] makes the analogous emptiness check (via
+/// [`subtree_contains_file`]) for the directory's own glyph; keep the two in
+/// step so a leaf's blank column and its parent's dirty-subtree mark agree.
+fn is_empty_dir(abs: &Path) -> bool {
+    abs.symlink_metadata().is_ok_and(|m| m.is_dir()) && !subtree_contains_file(abs)
 }
 
 fn collect_statuses(
@@ -1554,6 +1577,47 @@ mod tests {
             snap.display_code_for(r.root(), true),
             PorcelainCode::DIRTY_SUBTREE,
         );
+    }
+
+    #[test]
+    fn dirty_ancestors_skips_empty_untracked_dir() {
+        // An empty untracked directory tree (`mkdir -p x/y/z`) renders blank,
+        // so it must not flag the otherwise-clean root as a dirty subtree:
+        // `freshl -d .` stays CLEAN rather than showing `⋯`.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.create_dir("x/y/z");
+        let snap = r.snapshot();
+        assert!(!snap.has_dirty_descendants(r.root()));
+        assert_eq!(snap.display_code_for(r.root(), true), PorcelainCode::CLEAN);
+    }
+
+    #[test]
+    fn dirty_ancestors_includes_untracked_dir_with_content() {
+        // A single file beneath an untracked directory makes it real content,
+        // so the clean root flags a dirty subtree.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.write("bar/f", b"x");
+        let snap = r.snapshot();
+        assert!(snap.has_dirty_descendants(r.root()));
+        assert_eq!(
+            snap.display_code_for(r.root(), true),
+            PorcelainCode::DIRTY_SUBTREE,
+        );
+    }
+
+    #[test]
+    fn dirty_ancestors_counts_untracked_symlink_as_content() {
+        // An untracked symlink is content git stores (a blob), even one whose
+        // target is an empty directory, so it must flag its ancestors. Guards
+        // the `symlink_metadata`-not-`metadata` choice in `is_empty_dir`:
+        // following the link to its empty target would wrongly skip it.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.create_dir("target").symlink("target", "link");
+        let snap = r.snapshot();
+        assert!(snap.has_dirty_descendants(r.root()));
     }
 
     // ---------- Regression tests for the CLEAN-requires-proof invariant ----

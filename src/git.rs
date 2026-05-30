@@ -256,6 +256,18 @@ impl Snapshot {
         self.lookup(path) == PorcelainCode::IGNORED
     }
 
+    /// Whether `path` is git-ignored, using a caller-supplied directory flag
+    /// instead of an `lstat`. For a caller that already knows the entry's kind
+    /// (e.g. recursion gating) this matches [`Self::is_ignored`], and — unlike
+    /// [`Self::display_code_for`] — it never runs the empty-directory subtree
+    /// walk, which is irrelevant to ignore status.
+    #[must_use]
+    pub fn is_ignored_with_kind(&self, path: &Path, is_directory: bool) -> bool {
+        self.relativize(path).is_some_and(|rel| {
+            self.lookup_rel(&rel, || Some(is_directory)) == PorcelainCode::IGNORED
+        })
+    }
+
     /// Ignored descendants don't count — otherwise vendored/build trees would
     /// flag every ancestor.
     #[must_use]
@@ -266,10 +278,20 @@ impl Snapshot {
         self.dirty_ancestors.contains(&rel)
     }
 
-    /// Returns `DIRTY_SUBTREE` for a tracked-clean directory whose subtree
-    /// has dirty descendants; otherwise behaves like [`Self::lookup`].
-    /// Single path-normalisation for both checks. Outside-root paths return
-    /// [`PorcelainCode::BLANK`] (no glyph), matching [`Self::lookup`].
+    /// Directory-aware refinement of [`Self::lookup`]:
+    ///   - `DIRTY_SUBTREE` for a tracked-clean directory whose subtree has
+    ///     dirty descendants.
+    ///   - `BLANK` for an *empty* untracked directory — one with no file
+    ///     anywhere beneath it. Git tracks files, not directories, so it
+    ///     reports nothing for an empty dir; rendering `?` would be wrong.
+    ///     `mkdir -p x/y/z` leaves `x` blank; a single file beneath it makes
+    ///     it `?`. (An explicitly *ignored* empty dir stays `·`, matching
+    ///     `git status --ignored`, which lists `!! dir/` but never an empty
+    ///     untracked dir.)
+    ///
+    /// Otherwise behaves like [`Self::lookup`]. Single path-normalisation for
+    /// all checks. Outside-root paths return [`PorcelainCode::BLANK`] (no
+    /// glyph), matching [`Self::lookup`].
     #[must_use]
     pub fn display_code_for(&self, path: &Path, is_directory: bool) -> PorcelainCode {
         let Some(rel) = self.relativize(path) else {
@@ -278,6 +300,19 @@ impl Snapshot {
         let direct = self.lookup_rel(&rel, || Some(is_directory));
         if direct == PorcelainCode::CLEAN && is_directory && self.dirty_ancestors.contains(&rel) {
             PorcelainCode::DIRTY_SUBTREE
+        } else if direct == PorcelainCode::UNTRACKED
+            && is_directory
+            && !subtree_contains_file(&self.root.join(&rel))
+        {
+            // An empty directory — no file anywhere beneath it — has nothing
+            // git can track, so git reports no status for it: render blank, not
+            // `?`. The walk short-circuits at the first file, so a directory
+            // with content costs ~one `read_dir`. `statuses` can't pre-filter
+            // this: gix's dirwalk emits some empty untracked directories as
+            // entries, so membership there doesn't prove content. Walk the
+            // canonical in-root path (`root` + `rel`) so it's exactly the
+            // directory `lookup_rel` just classified, however `path` was spelled.
+            PorcelainCode::BLANK
         } else {
             direct
         }
@@ -486,6 +521,37 @@ fn compute_dirty_ancestors(statuses: &HashMap<PathBuf, PorcelainCode>) -> HashSe
 // extra `statuses.get("")` in `lookup_rel` is a harmless miss.
 fn iter_ancestors(rel: &Path) -> impl Iterator<Item = &Path> {
     rel.ancestors().skip(1)
+}
+
+/// `true` if `dir`'s subtree holds at least one non-directory entry, stopping
+/// at the first one rather than walking the whole tree. Tells an empty
+/// directory (which git can't track, so it renders blank) from one that holds
+/// other entries (renders `?`).
+///
+/// Any entry that isn't a subdirectory counts as content — regular files,
+/// symlinks, and the odd FIFO/socket/device alike — because the directory
+/// plainly isn't empty. `file_type` doesn't follow symlinks, so a
+/// symlink-to-directory counts as content rather than being descended, which
+/// also rules out symlink-loop recursion. A directory that can't be read, or
+/// an entry whose kind can't be determined, is treated as content so an
+/// unreadable tree keeps its `?` rather than silently going blank.
+fn subtree_contains_file(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&current) else {
+            return true;
+        };
+        for entry in read {
+            // A subdirectory: descend. Anything else — a file, symlink, or
+            // device, or an entry we can't read or stat — means the directory
+            // isn't provably empty, so it counts as content.
+            match entry.and_then(|e| e.file_type().map(|ft| (ft, e))) {
+                Ok((ft, e)) if ft.is_dir() => stack.push(e.path()),
+                _ => return true,
+            }
+        }
+    }
+    false
 }
 
 fn collect_statuses(
@@ -1081,6 +1147,106 @@ mod tests {
             snap.display_code_for(&r.root().join("newdir"), true),
             PorcelainCode::UNTRACKED,
         );
+    }
+
+    #[test]
+    fn display_blank_for_empty_untracked_dir() {
+        // Git can't track an empty directory, so it reports no status — the
+        // git column must be blank, not `?`.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.create_dir("empty");
+        assert_eq!(
+            r.snapshot().display_code_for(&r.root().join("empty"), true),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn display_blank_for_deep_empty_dir_chain() {
+        // `mkdir -p x/y/z`: no file exists anywhere beneath `x`, so every
+        // level renders blank.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.create_dir("x/y/z");
+        let snap = r.snapshot();
+        for rel in ["x", "x/y", "x/y/z"] {
+            assert_eq!(
+                snap.display_code_for(&r.root().join(rel), true),
+                PorcelainCode::BLANK,
+                "{rel} should render blank",
+            );
+        }
+    }
+
+    #[test]
+    fn display_untracked_for_dir_with_deep_file() {
+        // A single file anywhere beneath the directory flips it back to `?`.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.write("x/y/z/f", b"data");
+        assert_eq!(
+            r.snapshot().display_code_for(&r.root().join("x"), true),
+            PorcelainCode::UNTRACKED,
+        );
+    }
+
+    #[test]
+    fn display_blank_for_empty_subdir_in_untracked_dir() {
+        // An empty dir nested inside an untracked dir that has files elsewhere
+        // is still empty itself → blank, while the parent stays `?`.
+        let r = TestRepo::new();
+        r.write("seed", b"x").commit(&["."], "init");
+        r.write("newdir/note", b"x").create_dir("newdir/emptysub");
+        let snap = r.snapshot();
+        assert_eq!(
+            snap.display_code_for(&r.root().join("newdir"), true),
+            PorcelainCode::UNTRACKED,
+        );
+        assert_eq!(
+            snap.display_code_for(&r.root().join("newdir/emptysub"), true),
+            PorcelainCode::BLANK,
+        );
+    }
+
+    #[test]
+    fn display_ignored_for_empty_explicitly_ignored_dir() {
+        // An explicitly-ignored dir matches a rule even when empty (git status
+        // --ignored shows `!! build/`), so it stays `·` — only the UNTRACKED
+        // fall-through becomes blank.
+        let r = TestRepo::new();
+        r.write(".gitignore", b"build/\n").commit(&["."], "init");
+        r.create_dir("build");
+        assert_eq!(
+            r.snapshot().display_code_for(&r.root().join("build"), true),
+            PorcelainCode::IGNORED,
+        );
+    }
+
+    #[test]
+    fn subtree_contains_file_treats_unreadable_as_content() {
+        // `read_dir` fails on a non-directory or a missing path; "can't read"
+        // counts as content so the column stays `?` rather than silently blank.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(super::subtree_contains_file(&file));
+        assert!(super::subtree_contains_file(&tmp.path().join("missing")));
+    }
+
+    #[test]
+    fn is_ignored_with_kind_tracks_classification() {
+        let r = TestRepo::new();
+        r.write(".gitignore", b"build/\n")
+            .write("seed", b"x")
+            .commit(&["."], "init");
+        r.create_dir("build").create_dir("plain");
+        let snap = r.snapshot();
+        assert!(snap.is_ignored_with_kind(&r.root().join("build"), true));
+        assert!(!snap.is_ignored_with_kind(&r.root().join("plain"), true));
+        // A path outside the workdir can't be relativized → not ignored.
+        let outside = tempfile::tempdir().unwrap();
+        assert!(!snap.is_ignored_with_kind(&outside.path().join("x"), true));
     }
 
     #[test]

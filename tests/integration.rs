@@ -237,6 +237,45 @@ fn git_repo_marks_ignored_subdir_inside_untracked_dir() {
 }
 
 #[test]
+fn git_repo_empty_dir_renders_blank_not_untracked() {
+    // Git can't track an empty directory, so freshl must leave its git column
+    // blank — neither `mkdir empty` nor `mkdir -p deep/a/b` is `?`. A sibling
+    // untracked dir that actually holds a file still shows `?`.
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::write(dir.path().join("seed"), b"x").unwrap();
+    run_git(dir.path(), &["add", "."]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+
+    fs::create_dir(dir.path().join("empty")).unwrap();
+    fs::create_dir_all(dir.path().join("deep/a/b")).unwrap();
+    fs::create_dir(dir.path().join("has_file")).unwrap();
+    fs::write(dir.path().join("has_file/inner"), b"x").unwrap();
+
+    let (code, out, _err) = run_paths(&[dir.path()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+
+    let row = |name: &str| {
+        out.lines()
+            .find(|l| l.contains(name))
+            .unwrap_or_else(|| panic!("row for {name} missing in: {out}"))
+            .to_string()
+    };
+    assert!(
+        !row("empty").contains('?'),
+        "empty dir must not show ?: {out}"
+    );
+    assert!(
+        !row("deep").contains('?'),
+        "deep empty dir must not show ?: {out}"
+    );
+    assert!(
+        row("has_file").contains('?'),
+        "untracked dir with a file must still show ?: {out}"
+    );
+}
+
+#[test]
 fn git_repo_marks_modified_in_worktree() {
     let dir = tempdir().unwrap();
     init_repo(dir.path());

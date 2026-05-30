@@ -382,9 +382,7 @@ fn should_descend(entry: &Entry, snapshot: Option<&Snapshot>, options: ListOptio
     // git's perspective, so trailing-slash exclude rules like `vendor/`
     // must not match it.
     if options.unrestricted < 1
-        && snapshot.is_some_and(|s| {
-            s.display_code_for(&entry.path, is_real_dir(entry)) == PorcelainCode::IGNORED
-        })
+        && snapshot.is_some_and(|s| s.is_ignored_with_kind(&entry.path, is_real_dir(entry)))
     {
         return false;
     }

@@ -31,9 +31,12 @@ env:
 
 jobs:
   test:
+    name: test # == job id so the main-branch ruleset's required "test" check still matches
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
@@ -48,6 +51,7 @@ jobs:
       - run: make test
 
   coverage:
+    name: coverage # == job id so the main-branch ruleset's required "coverage" check still matches
     runs-on: ubuntu-24.04
     # Pinned: newer nightlies have triggered llvm-cov "mismatched data"
     # warnings that drop profile data for some functions, producing phantom
@@ -60,6 +64,8 @@ jobs:
       CARGO_LLVM_COV_VERSION: 0.8.7
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cargo/bin/cargo-llvm-cov
@@ -76,3 +82,18 @@ jobs:
       - run: rustup toolchain install $NIGHTLY --profile minimal --component llvm-tools-preview
       - run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version $CARGO_LLVM_COV_VERSION
       - run: make coverage NIGHTLY=$NIGHTLY
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
+        with:
+          persona: pedantic
+          # Gate on zizmor's exit code plus inline annotations rather than
+          # uploading SARIF, which would require security-events: write.
+          advanced-security: false
+          annotations: true

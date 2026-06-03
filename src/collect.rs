@@ -36,6 +36,10 @@ const S_IFIFO: u32 = 0o010_000;
 pub struct DirListing {
     pub entries: Vec<Entry>,
     pub errors: Vec<(PathBuf, io::Error)>,
+    /// Owner uid of the directory itself, so the renderer can dim entries that
+    /// share it (the common case) and let the eye catch entries owned by
+    /// someone else. `None` if the directory could not be stat'd.
+    pub owner_uid: Option<u32>,
 }
 
 /// Read `path` as a directory and return one [`Entry`] per child that could
@@ -52,7 +56,13 @@ pub struct DirListing {
 /// individual file doesn't hide the rest of the directory's contents.
 pub fn collect_directory(path: &Path) -> io::Result<DirListing> {
     let mut iter = fs::read_dir(path)?.map(|r| r.map(|de| de.path()));
-    Ok(process_paths(&mut iter, path))
+    let mut listing = process_paths(&mut iter, path);
+    // Best-effort: `read_dir` already succeeded, so a metadata failure here is
+    // unlikely; `None` simply means "don't dim the owner column". Follows
+    // symlinks, so a symlinked-directory argument uses its target's owner —
+    // consistent with how each entry already follows its symlink.
+    listing.owner_uid = fs::metadata(path).ok().map(|m| m.uid());
+    Ok(listing)
 }
 
 // Takes a `&mut dyn Iterator` so the function compiles to a single

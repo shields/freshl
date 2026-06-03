@@ -15,7 +15,7 @@
 #[cfg(not(unix))]
 compile_error!("freshl targets POSIX file metadata and only builds on Unix.");
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -253,6 +253,7 @@ fn list_directory(
         snapshot,
         caches.now,
         caches.umask,
+        listing.owner_uid,
     )?;
     Ok(report_listing_errors(stderr, &listing.errors))
 }
@@ -361,6 +362,7 @@ fn list_recursive(
             snapshot,
             caches.now,
             caches.umask,
+            listing.owner_uid,
         )?;
         had_error |= report_listing_errors(stderr, &listing.errors);
         // Push in reverse so the first sorted subdir pops next: depth-first
@@ -397,6 +399,10 @@ fn is_real_dir(entry: &Entry) -> bool {
     entry.kind == EntryKind::Directory && entry.follow_chain.is_empty()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owners (mut) and palette/snapshot (shared) must stay split — snapshot is a live borrow of caches.snapshots held across this call — alongside per-block context (now, umask, dir owner)"
+)]
 fn render_entries(
     stdout: &mut dyn Write,
     entries: &[Entry],
@@ -405,10 +411,11 @@ fn render_entries(
     snapshot: Option<&Snapshot>,
     now: SystemTime,
     umask: u32,
+    dir_owner_uid: Option<u32>,
 ) -> Result<(), Error> {
     let mut rows: Vec<Row> = entries
         .iter()
-        .map(|e| build_row(e, owners, palette, now, umask))
+        .map(|e| build_row(e, owners, palette, now, umask, dir_owner_uid))
         .collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
         enrich_row(row, entry, palette, snapshot);
@@ -433,8 +440,22 @@ fn render_files(
     let mut any_git = false;
     let now = caches.now;
     let umask = caches.umask;
+    // Each argument may sit in a different directory, so its owner is dimmed
+    // against the owner of its containing directory. Cache by directory so a
+    // glob of same-directory arguments costs one stat, not one per file.
+    let mut dir_owners: HashMap<PathBuf, Option<u32>> = HashMap::new();
     for entry in entries {
-        let mut row = build_row(entry, &mut caches.owners, &caches.palette, now, umask);
+        let dir_owner_uid = *dir_owners
+            .entry(containing_dir(&entry.path))
+            .or_insert_with_key(|dir| std::fs::metadata(dir).ok().map(|m| m.uid()));
+        let mut row = build_row(
+            entry,
+            &mut caches.owners,
+            &caches.palette,
+            now,
+            umask,
+            dir_owner_uid,
+        );
         let snap = caches.snapshots.for_target(&entry.path);
         if snap.is_some() {
             any_git = true;
@@ -444,6 +465,27 @@ fn render_files(
     }
     let git_width = if any_git { format::git_col::WIDTH } else { 0 };
     write_rows(stdout, &rows, git_width)
+}
+
+/// The directory that contains `path`, for owner-column dimming.
+///
+/// When the trailing component is a real name — a file or a named directory —
+/// the container is the lexical parent, and a bare name (empty parent) lives in
+/// the current directory. When it is `.`, `..`, `/`, or a trailing `.`/`..` —
+/// which have no usable lexical parent — append `..` and let the kernel resolve
+/// the real container when the path is stat'd. Lexical `Path::parent` would
+/// wrongly yield `.` for `.` (so `.` would always match its own owner and dim)
+/// or the path itself.
+fn containing_dir(path: &Path) -> PathBuf {
+    use std::path::Component;
+    if let Some(Component::Normal(_)) = path.components().next_back() {
+        match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        }
+    } else {
+        path.join("..")
+    }
 }
 
 fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<&Snapshot>) {
@@ -763,6 +805,26 @@ mod tests {
         // it must not count as a "real" dir.
         e.follow_chain = vec![PathBuf::from("target")];
         assert!(!is_real_dir(&e));
+    }
+
+    #[test]
+    fn containing_dir_resolves_parent_including_dot_and_root() {
+        use super::containing_dir;
+        use std::path::{Path, PathBuf};
+        // A real trailing component: the lexical parent is the real container.
+        assert_eq!(
+            containing_dir(Path::new("/etc/passwd")),
+            PathBuf::from("/etc")
+        );
+        assert_eq!(containing_dir(Path::new("a/b")), PathBuf::from("a"));
+        // A bare relative name has no parent component; it lives in the cwd.
+        assert_eq!(containing_dir(Path::new("bar.txt")), PathBuf::from("."));
+        // `.`, `..`, `/` have no usable lexical parent, so we append `..` and
+        // let the kernel resolve the real container: `stat("./..")` is the
+        // parent of the cwd, not the cwd itself.
+        assert_eq!(containing_dir(Path::new(".")), PathBuf::from("./.."));
+        assert_eq!(containing_dir(Path::new("..")), PathBuf::from("../.."));
+        assert_eq!(containing_dir(Path::new("/")), PathBuf::from("/.."));
     }
 
     #[test]

@@ -52,6 +52,7 @@ from that, there are _no display options_. You get it my way.
 There is also context-sensitive dimming to deemphasize less-useful information:
 
 - File modes are dimmed if they are the default for your current `umask`.
+- Owners are dimmed if they match the owner of the containing directory.
 - Groups are dimmed if they are the primary group for that user.
 - If a file size is 1 MB or more, the low-order digits are dimmed in groups of
   six. For example, a file of size 14142135 would have only `14` undimmed.

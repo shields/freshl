@@ -38,6 +38,10 @@ pub struct ColumnWidths {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent per-column dim hints (mode, nlink, owner, group), not a state machine"
+)]
 pub struct Row {
     pub kind: char,
     pub mode: String,
@@ -52,6 +56,11 @@ pub struct Row {
     /// catch hardlinked entries.
     pub dim_nlink: bool,
     pub owner: String,
+    /// Wrap the owner column in dim escapes at render time when the uid matches
+    /// the owner of the containing directory — that column then carries no
+    /// extra information, so dimming it lets the eye catch rows owned by
+    /// someone other than that directory's owner.
+    pub dim_owner: bool,
     pub group: String,
     /// Wrap the group column in dim escapes at render time when the gid is
     /// the owner's primary group from passwd — that column then carries no
@@ -76,6 +85,7 @@ pub fn build_row<D: UserDirectory>(
     palette: &Palette,
     now: SystemTime,
     umask: u32,
+    dir_owner_uid: Option<u32>,
 ) -> Row {
     let dim = Style::new().effects(Effects::DIMMED);
     let broken = entry.is_broken_link();
@@ -95,6 +105,9 @@ pub fn build_row<D: UserDirectory>(
     let kind = entry.kind.type_char();
     let mode = perms::format_perms(entry.mode);
     let dim_mode = broken || perms::is_default(entry.kind, entry.mode, umask);
+    // Compares raw uids, so numeric-fallback owners (no passwd entry) still dim
+    // correctly; `None` (unknown directory owner) never matches, so nothing dims.
+    let dim_owner = dir_owner_uid == Some(entry.uid);
     let dim_group = owners.gid_is_primary(entry.uid, entry.gid);
     Row {
         kind,
@@ -103,6 +116,7 @@ pub fn build_row<D: UserDirectory>(
         nlink: entry.nlink.to_string(),
         dim_nlink: entry.nlink == 1,
         owner: owners.user(entry.uid).to_string_lossy().into_owned(),
+        dim_owner,
         group: owners.group(entry.gid).to_string_lossy().into_owned(),
         dim_group,
         size,
@@ -159,7 +173,10 @@ pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> 
         let _ = write!(out, "{:>w$}", row.nlink, w = widths.nlink);
     });
     out.push(b' ');
-    let _ = write!(out, "{:<w$} ", row.owner, w = widths.owner);
+    wrap_dim(&mut out, row.dim_owner, dim, |out| {
+        let _ = write!(out, "{:<w$}", row.owner, w = widths.owner);
+    });
+    out.push(b' ');
     wrap_dim(&mut out, row.dim_group, dim, |out| {
         let _ = write!(out, "{:<w$}", row.group, w = widths.group);
     });
@@ -236,7 +253,14 @@ mod tests {
             e.kind = kind;
             e.size = 0;
             e.rdev = rdev;
-            let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+            let row = build_row(
+                &e,
+                &mut owners,
+                &palette,
+                SystemTime::UNIX_EPOCH,
+                0o022,
+                None,
+            );
             assert_eq!(row.size, expected);
             assert_eq!(row.size_width, expected.len());
             assert_eq!(row.kind, kind_char);
@@ -253,6 +277,7 @@ mod tests {
             &palette,
             SystemTime::UNIX_EPOCH,
             0o022,
+            None,
         );
         assert_eq!(row.kind, ' ');
         assert_eq!(row.mode, "644");
@@ -273,7 +298,14 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.mode = 0o100_600;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+        let row = build_row(
+            &e,
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            None,
+        );
         assert_eq!(row.mode, "600");
         assert!(!row.dim_mode);
     }
@@ -284,7 +316,14 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.nlink = 2;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+        let row = build_row(
+            &e,
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            None,
+        );
         assert_eq!(row.nlink, "2");
         assert!(!row.dim_nlink);
     }
@@ -295,7 +334,14 @@ mod tests {
         let palette = Palette::empty();
         let mut e = entry("hi");
         e.gid = 30;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+        let row = build_row(
+            &e,
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            None,
+        );
         assert!(!row.dim_group);
     }
 
@@ -318,6 +364,7 @@ mod tests {
             &palette,
             SystemTime::UNIX_EPOCH,
             0o022,
+            None,
         );
         assert!(!row.dim_group);
     }
@@ -329,7 +376,14 @@ mod tests {
         let mut e = entry("d");
         e.kind = EntryKind::Directory;
         e.mode = 0o040_755;
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+        let row = build_row(
+            &e,
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            None,
+        );
         assert_eq!(row.kind, 'd');
         assert_eq!(row.mode, "755");
         assert!(row.dim_mode);
@@ -344,7 +398,14 @@ mod tests {
         e.mode = 0o120_777;
         e.size = 9;
         e.follow_chain = vec![PathBuf::from("builds/v9")];
-        let row = build_row(&e, &mut owners, &palette, SystemTime::UNIX_EPOCH, 0o022);
+        let row = build_row(
+            &e,
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            None,
+        );
         assert_eq!(row.kind, 'l');
         assert!(row.dim_mode, "broken link mode describes the link, dim it");
         // The size describes the link inode (target-path length), not a file, so
@@ -359,6 +420,52 @@ mod tests {
     }
 
     #[test]
+    fn build_row_dims_owner_when_uid_matches_directory() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        // The fixture entry's uid is 501; a matching directory owner ⇒ dim.
+        let row = build_row(
+            &entry("hi"),
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            Some(501),
+        );
+        assert!(row.dim_owner);
+    }
+
+    #[test]
+    fn build_row_clears_dim_owner_when_uid_differs() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let row = build_row(
+            &entry("hi"),
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            Some(0),
+        );
+        assert!(!row.dim_owner);
+    }
+
+    #[test]
+    fn build_row_clears_dim_owner_when_directory_owner_unknown() {
+        let mut owners = OwnerCache::new(Fixed);
+        let palette = Palette::empty();
+        let row = build_row(
+            &entry("hi"),
+            &mut owners,
+            &palette,
+            SystemTime::UNIX_EPOCH,
+            0o022,
+            None,
+        );
+        assert!(!row.dim_owner);
+    }
+
+    #[test]
     fn compute_widths_finds_maximum_of_each_column() {
         let rows = vec![
             Row {
@@ -368,6 +475,7 @@ mod tests {
                 nlink: "1".into(),
                 dim_nlink: false,
                 owner: "x".into(),
+                dim_owner: false,
                 group: "staff".into(),
                 dim_group: false,
                 size: "1".into(),
@@ -383,6 +491,7 @@ mod tests {
                 nlink: "99".into(),
                 dim_nlink: false,
                 owner: "longer".into(),
+                dim_owner: false,
                 group: "g".into(),
                 dim_group: false,
                 size: "1234".into(),
@@ -416,6 +525,7 @@ mod tests {
             nlink: "2".into(),
             dim_nlink: false,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: false,
             size: "0".into(),
@@ -445,6 +555,7 @@ mod tests {
             nlink: "2".into(),
             dim_nlink: false,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: false,
             size: "0".into(),
@@ -480,6 +591,7 @@ mod tests {
             nlink: "2".into(),
             dim_nlink: false,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: false,
             size: "0".into(),
@@ -513,6 +625,7 @@ mod tests {
             nlink: "1".into(),
             dim_nlink: true,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: false,
             size: "0".into(),
@@ -548,6 +661,7 @@ mod tests {
             nlink: "1".into(),
             dim_nlink: false,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: true,
             size: "0".into(),
@@ -575,6 +689,42 @@ mod tests {
     }
 
     #[test]
+    fn render_row_wraps_owner_in_dim_when_flagged() {
+        let row = Row {
+            kind: '-',
+            mode: "644".into(),
+            dim_mode: false,
+            nlink: "1".into(),
+            dim_nlink: false,
+            owner: "alice".into(),
+            dim_owner: true,
+            group: "staff".into(),
+            dim_group: false,
+            size: "0".into(),
+            size_width: 1,
+            mtime: "2026-05-15T11:02:00Z".into(),
+            git: None,
+            name: b"src".to_vec(),
+        };
+        let widths = ColumnWidths {
+            mode: 3,
+            nlink: 1,
+            owner: 5,
+            group: 5,
+            size: 1,
+        };
+        let s = render_row(&row, widths, 0);
+        let dim = Style::new().effects(Effects::DIMMED);
+        let open = format!("{dim}");
+        let close = format!("{}", dim.render_reset());
+        let expected = format!("{open}alice{close} ");
+        assert!(
+            s.windows(expected.len()).any(|w| w == expected.as_bytes()),
+            "row should open dim before owner, close after: {s:?}",
+        );
+    }
+
+    #[test]
     fn render_row_emits_git_column_when_width_set() {
         let mut row = Row {
             kind: '-',
@@ -583,6 +733,7 @@ mod tests {
             nlink: "1".into(),
             dim_nlink: false,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: false,
             size: "0".into(),
@@ -615,6 +766,7 @@ mod tests {
             nlink: "1".into(),
             dim_nlink: false,
             owner: "alice".into(),
+            dim_owner: false,
             group: "staff".into(),
             dim_group: false,
             size: "0".into(),

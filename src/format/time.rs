@@ -32,9 +32,9 @@ pub fn format_time(time: SystemTime) -> String {
 
 const HOUR: u64 = 3600;
 const DAY: u64 = 24 * HOUR;
-// Approximate one year as 365 days. The exact boundary doesn't matter
+// Approximate six months as 180 days. The exact boundary doesn't matter
 // visually — this tier is a soft age cue, not a precise calendar comparison.
-const YEAR: u64 = 365 * DAY;
+const SIX_MONTHS: u64 = 180 * DAY;
 
 /// Decompose `YYYY[Y...]-MM-DDTHH:MM:SSZ` by separators. Year width is
 /// variable (jiff can emit more digits for out-of-range years and a leading
@@ -55,8 +55,8 @@ fn parse_iso8601_z(s: &str) -> Option<(&str, &str, &str, &str, &str, &str)> {
 /// Date dim always cascades from the left so the bright remainder is a single
 /// run (no "bright middle" between two dim fields):
 ///   * last 24 hours → year and month (with their trailing hyphens)
-///   * 24h–~1 year  → year only (with its trailing hyphen)
-///   * ≥ ~1 year → date stays fully bright (the differing date is the headline)
+///   * 24h–~6 months → year only (with its trailing hyphen)
+///   * ≥ ~6 months → date stays fully bright (the differing date is the headline)
 ///
 /// The time portion fades in two steps: `:SS` once the row is at least an hour
 /// old; the rest of `HH:MM:SS` once it's at least a day old. The `T` separator
@@ -81,8 +81,8 @@ pub fn format_time_styled(time: SystemTime, now: SystemTime, dim: Style) -> Stri
         parse_iso8601_z(&plain).expect("format_time emits YYYY-MM-DDTHH:MM:SSZ");
 
     let segs: [(&str, bool); 12] = [
-        (year, past_secs < YEAR),
-        ("-", past_secs < YEAR),
+        (year, past_secs < SIX_MONTHS),
+        ("-", past_secs < SIX_MONTHS),
         (month, past_secs < DAY),
         ("-", past_secs < DAY),
         (day, false),
@@ -227,10 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn styled_dims_only_year_within_a_year() {
-        // 24h–1y tier: year + trailing hyphen dim; month/day bright; full time dim.
+    fn styled_dims_only_year_just_under_six_months() {
+        // 24h–6mo tier: year + trailing hyphen dim; month/day bright; full
+        // time dim. One second shy of the cutoff, to pin its lower edge.
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(T_2026_05_01);
-        let now = time + Duration::from_hours(7 * 24);
+        let now = time + Duration::from_hours(180 * 24) - Duration::from_secs(1);
         let styled = format_time_styled(time, now, dim());
         assert_eq!(
             styled,
@@ -249,9 +250,11 @@ mod tests {
     }
 
     #[test]
-    fn styled_leaves_date_bright_beyond_a_year() {
+    fn styled_leaves_date_bright_once_six_months_old() {
+        // Exactly at the 180-day cutoff the full date undims; with the
+        // just-under test this pins the cutoff value and its boundary side.
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(T_2026_05_01);
-        let now = time + Duration::from_hours(400 * 24);
+        let now = time + Duration::from_hours(180 * 24);
         let styled = format_time_styled(time, now, dim());
         assert_eq!(
             styled,

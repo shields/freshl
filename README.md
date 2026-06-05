@@ -59,7 +59,7 @@ There is also context-sensitive dimming to deemphasize less-useful information:
 - Timestamps are dimmed progressively with age, leaving undimmed the part that
   best distinguishes them from now: the day and `HH:MM:SS` at first, the day and
   `HH:MM` after an hour, the month and day after 24 hours, and the full date
-  after a year. Future timestamps are fully undimmed.
+  after six months. Future timestamps are fully undimmed.
 
 ## Recommended usage
 

@@ -56,8 +56,10 @@ There is also context-sensitive dimming to deemphasize less-useful information:
 - Groups are dimmed if they are the primary group for that user.
 - If a file size is 1 MB or more, the low-order digits are dimmed in groups of
   six. For example, a file of size 14142135 would have only `14` undimmed.
-- A contiguous section of the timestamp is undimmed, generally three elements.
-  Future timestamps are fully undimmed.
+- Timestamps are dimmed progressively with age, leaving undimmed the part that
+  best distinguishes them from now: the day and `HH:MM:SS` at first, the day and
+  `HH:MM` after an hour, the month and day after 24 hours, and the full date
+  after a year. Future timestamps are fully undimmed.
 
 ## Recommended usage
 

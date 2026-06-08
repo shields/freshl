@@ -71,11 +71,6 @@ pub fn compare_by(a: &Entry, b: &Entry, sensitivity: Sensitivity, key: SortKey) 
     }
 }
 
-#[must_use]
-pub fn compare(a: &Entry, b: &Entry, sensitivity: Sensitivity) -> Ordering {
-    compare_by(a, b, sensitivity, SortKey::Name)
-}
-
 pub fn sort_with(entries: &mut [Entry], sensitivity: Sensitivity, key: SortKey, reverse: bool) {
     // -r reverses the within-group order only; directories stay grouped at
     // the top regardless of the requested key.
@@ -162,7 +157,7 @@ fn digit_run_end(bytes: &[u8], start: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{SortKey, compare, natural_cmp, sort, sort_with};
+    use super::{SortKey, compare_by, natural_cmp, sort, sort_with};
     use crate::case::Sensitivity;
     use crate::entry::{Entry, EntryKind};
     use std::cmp::Ordering;
@@ -250,8 +245,14 @@ mod tests {
     fn directories_sort_before_files() {
         let d = entry("z", EntryKind::Directory);
         let f = entry("a", EntryKind::RegularFile);
-        assert_eq!(compare(&d, &f, Sensitivity::Sensitive), Ordering::Less);
-        assert_eq!(compare(&f, &d, Sensitivity::Sensitive), Ordering::Greater);
+        assert_eq!(
+            compare_by(&d, &f, Sensitivity::Sensitive, SortKey::Name),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_by(&f, &d, Sensitivity::Sensitive, SortKey::Name),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -259,11 +260,11 @@ mod tests {
         let link = entry("a_link", EntryKind::Symlink);
         let real = entry("z_dir", EntryKind::Directory);
         assert_eq!(
-            compare(&real, &link, Sensitivity::Sensitive),
+            compare_by(&real, &link, Sensitivity::Sensitive, SortKey::Name),
             Ordering::Less
         );
         assert_eq!(
-            compare(&link, &real, Sensitivity::Sensitive),
+            compare_by(&link, &real, Sensitivity::Sensitive, SortKey::Name),
             Ordering::Greater
         );
     }
@@ -274,11 +275,11 @@ mod tests {
         let file = entry("b_file", EntryKind::RegularFile);
         let dir = entry("z_dir", EntryKind::Directory);
         assert_eq!(
-            compare(&broken, &file, Sensitivity::Sensitive),
+            compare_by(&broken, &file, Sensitivity::Sensitive, SortKey::Name),
             Ordering::Less
         );
         assert_eq!(
-            compare(&dir, &broken, Sensitivity::Sensitive),
+            compare_by(&dir, &broken, Sensitivity::Sensitive, SortKey::Name),
             Ordering::Less
         );
     }
@@ -287,11 +288,17 @@ mod tests {
     fn within_a_group_natural_order_applies() {
         let a = entry("file2", EntryKind::RegularFile);
         let b = entry("file10", EntryKind::RegularFile);
-        assert_eq!(compare(&a, &b, Sensitivity::Sensitive), Ordering::Less);
+        assert_eq!(
+            compare_by(&a, &b, Sensitivity::Sensitive, SortKey::Name),
+            Ordering::Less
+        );
 
         let da = entry("Dir2", EntryKind::Directory);
         let db = entry("dir10", EntryKind::Directory);
-        assert_eq!(compare(&da, &db, Sensitivity::Insensitive), Ordering::Less);
+        assert_eq!(
+            compare_by(&da, &db, Sensitivity::Insensitive, SortKey::Name),
+            Ordering::Less
+        );
     }
 
     #[test]

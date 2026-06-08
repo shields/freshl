@@ -543,6 +543,38 @@ mod tests {
         format!("{code:?}")
     }
 
+    /// Run `git -C <dir> <args>` against a throwaway repo, asserting success.
+    ///
+    /// `make coverage` (the lefthook pre-commit gate) runs these tests *inside a
+    /// git hook*, where git exports `GIT_DIR` / `GIT_INDEX_FILE` / … pointing at
+    /// the outer freshl repo. Inherited, they hijack the throwaway repo driven
+    /// via `-C` — even `git init` then writes to the outer `.git`. Clear them so
+    /// each invocation discovers its repo via `-C` alone, hook or no hook.
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("HOME", dir);
+        for var in [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_PREFIX",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_NAMESPACE",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ] {
+            cmd.env_remove(var);
+        }
+        let status = cmd.status().unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
     struct FailingWriter;
 
     impl Write for FailingWriter {
@@ -1107,7 +1139,6 @@ mod tests {
 
     #[test]
     fn recursive_skips_gitignored_directory_by_default() {
-        use std::process::Command;
         let dir = tempdir().unwrap();
         // Set up a tiny repo with an ignored subdirectory.
         for args in [
@@ -1115,16 +1146,7 @@ mod tests {
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
         ] {
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("HOME", dir.path())
-                .status()
-                .unwrap();
-            assert!(status.success());
+            run_git(dir.path(), &args);
         }
         let ignored = dir.path().join("ignored_dir");
         fs::create_dir(&ignored).unwrap();
@@ -1245,36 +1267,17 @@ mod tests {
 
     #[test]
     fn file_arg_inside_git_repo_shows_git_column() {
-        use std::process::Command;
         let dir = tempdir().unwrap();
         for cmd_args in [
             vec!["init", "-q", "-b", "main"],
             vec!["config", "user.email", "t@example.com"],
             vec!["config", "user.name", "t"],
         ] {
-            let status = Command::new("git")
-                .arg("-C")
-                .arg(dir.path())
-                .args(cmd_args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("HOME", dir.path())
-                .status()
-                .unwrap();
-            assert!(status.success());
+            run_git(dir.path(), &cmd_args);
         }
         let file = dir.path().join("tracked");
         fs::write(&file, b"hi").unwrap();
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(dir.path())
-            .args(["add", "tracked"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("HOME", dir.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
+        run_git(dir.path(), &["add", "tracked"]);
 
         let mut out = Vec::new();
         let mut err = Vec::new();

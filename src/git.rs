@@ -755,16 +755,43 @@ mod tests {
     // can't have two of them sharing index state via environment.
     static GIT_LOCK: Mutex<()> = Mutex::new(());
 
-    fn run_git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .arg("-C")
+    /// A `git -C <dir>` command with a hermetic environment: global/system
+    /// config and `HOME` pinned to the throwaway repo, and git's location
+    /// variables cleared.
+    ///
+    /// `make coverage` (the lefthook pre-commit gate) runs this suite *inside a
+    /// git hook*, where git exports `GIT_DIR` / `GIT_INDEX_FILE` / `GIT_PREFIX`
+    /// / … pointing at the *outer* freshl repo. Inherited, they hijack the
+    /// throwaway repo driven via `-C` — even `git init` then writes to the
+    /// outer `.git`, and `git submodule add` resolves a relative
+    /// `GIT_INDEX_FILE` against the wrong tree. Clear them so each invocation
+    /// discovers its repo via `-C` alone, hook or no hook.
+    fn git_command(dir: &Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C")
             .arg(dir)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("HOME", dir)
-            .status()
-            .unwrap();
+            .env("HOME", dir);
+        for var in [
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_PREFIX",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_NAMESPACE",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        ] {
+            cmd.env_remove(var);
+        }
+        cmd
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = git_command(dir, args).status().unwrap();
         assert!(status.success(), "git {args:?} failed");
     }
 
@@ -1095,13 +1122,7 @@ mod tests {
         r.write("c", b"main\n")
             .git(&["commit", "-q", "-am", "main"]);
         // git merge exits non-zero on conflict; ignore its status.
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(r.root())
-            .args(["merge", "--no-edit", "-q", "other"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("HOME", r.root())
+        let _ = git_command(r.root(), &["merge", "--no-edit", "-q", "other"])
             .status()
             .unwrap();
         assert_eq!(status_at(&r.snapshot(), "c"), PorcelainCode::UNMERGED);
@@ -1901,18 +1922,22 @@ mod tests {
         run_git(inner.path(), &["add", "inside"]);
         run_git(inner.path(), &["commit", "-q", "-m", "inner"]);
         // `git submodule add` from a local path; the protocol restriction
-        // env var lets file:// urls through in modern git.
+        // flag lets file:// urls through in modern git.
         let inner_url = format!("file://{}", inner.path().display());
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(r.root())
-            .args(["-c", "protocol.file.allow=always"])
-            .args(["submodule", "add", "-q", &inner_url, "submod"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("HOME", r.root())
-            .status()
-            .unwrap();
+        let status = git_command(
+            r.root(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &inner_url,
+                "submod",
+            ],
+        )
+        .status()
+        .unwrap();
         assert!(status.success(), "git submodule add failed");
         r.commit(&["."], "add submod");
         let snap = r.snapshot();
@@ -2035,16 +2060,20 @@ mod tests {
         run_git(inner.path(), &["add", "inside"]);
         run_git(inner.path(), &["commit", "-q", "-m", "inner"]);
         let inner_url = format!("file://{}", inner.path().display());
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(r.root())
-            .args(["-c", "protocol.file.allow=always"])
-            .args(["submodule", "add", "-q", &inner_url, "submod"])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("HOME", r.root())
-            .status()
-            .unwrap();
+        let status = git_command(
+            r.root(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &inner_url,
+                "submod",
+            ],
+        )
+        .status()
+        .unwrap();
         assert!(status.success(), "git submodule add failed");
         r.commit(&["."], "add submod");
         assert_eq!(

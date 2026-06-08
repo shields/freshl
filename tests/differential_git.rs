@@ -164,6 +164,24 @@ fn git_base(dir: &Path) -> Command {
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("HOME", dir);
+    // `make coverage` (the lefthook pre-commit gate) runs this suite *inside a
+    // git hook*, where git exports GIT_DIR / GIT_INDEX_FILE / GIT_PREFIX / …
+    // pointing at the *outer* freshl repo. Inherited, they hijack the throwaway
+    // repo driven via `-C` — even `git init` then writes to the outer `.git`.
+    // Clear them so each invocation discovers its repo via `-C` alone.
+    for var in [
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        cmd.env_remove(var);
+    }
     cmd
 }
 

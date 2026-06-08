@@ -156,7 +156,7 @@ derived independently from git's per-file output in the differential test.
 | Device rdev as hex              | T            | integration.rs; format/size.rs               |
 | mtime now / past / dim boundary | T            | format/time.rs tests                         |
 | Pre-epoch mtime                 | T            | format/time.rs `pre_epoch_renders_correctly` |
-| Far-future mtime (year 2100+)   | T (gap test) | gaps.rs (year 2096)                          |
+| Far-future mtime (year 2096)    | T (gap test) | gaps.rs (year 2096)                          |
 
 ## Recursion (`-R`)
 

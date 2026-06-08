@@ -28,8 +28,9 @@ output. Also unlike `ls`, you can use `-r` again to double-reverse: `-rt` will
 output the oldest files last. `-rr` or `-rrrr` will have no effect, but you can
 `ls` like a pirate.
 
-`-R` ignores gitignored and dotfile dirs, unless with `-u` or `-uu` (à la
-`ripgrep`).
+`-R` skips gitignored and dotfile dirs by default. Like `ripgrep`, `-u` lifts
+that one level at a time: `-u` descends into gitignored dirs, and `-uu` also
+descends into dotfile dirs.
 
 Symlinks are always followed: a row reads `name → target` (or
 `name → mid → target` for multi-hop), with the final target in its natural

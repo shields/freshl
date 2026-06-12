@@ -245,12 +245,14 @@ fn list_directory(
     };
     sort::sort_with(&mut entries, sense, options.sort_key, options.reverse);
     let snapshot = caches.snapshots.for_target(target);
+    let git_base = snapshot.and_then(|_| std::fs::canonicalize(target).ok());
     render_entries(
         stdout,
         &entries,
         &mut caches.owners,
         &caches.palette,
         snapshot,
+        git_base.as_deref(),
         caches.now,
         caches.umask,
         listing.owner_uid,
@@ -340,19 +342,27 @@ fn list_recursive(
         };
         sort::sort_with(&mut entries, sense, options.sort_key, options.reverse);
         let snapshot = caches.snapshots.for_target(&target);
-        // Decide descent BEFORE rendering so we don't have to revisit the
-        // snapshot lookup later (it can canonicalize, so each call has cost).
+        // Canonicalise the listed directory once: every entry shares it as a
+        // parent, and a symlinked target (`freshl b/` where `b -> a`) must key
+        // git status by the real path. Resolving here keeps each per-row git
+        // lookup a lexical strip rather than a `canonicalize` syscall.
+        let git_base = snapshot.and_then(|_| std::fs::canonicalize(&target).ok());
         let mut to_push: Vec<(PathBuf, Vec<Inode>)> = Vec::new();
         for entry in &entries {
-            if entry.kind == EntryKind::Directory && should_descend(entry, snapshot, options) {
-                let key = (entry.dev, entry.ino);
-                if ancestors.contains(&key) {
-                    continue;
-                }
-                let mut child_ancestors = ancestors.clone();
-                child_ancestors.push(key);
-                to_push.push((entry.path.clone(), child_ancestors));
+            if entry.kind != EntryKind::Directory {
+                continue;
             }
+            let git_path = entry_git_path(git_base.as_deref(), entry);
+            if !should_descend(entry, &git_path, snapshot, options) {
+                continue;
+            }
+            let key = (entry.dev, entry.ino);
+            if ancestors.contains(&key) {
+                continue;
+            }
+            let mut child_ancestors = ancestors.clone();
+            child_ancestors.push(key);
+            to_push.push((entry.path.clone(), child_ancestors));
         }
         render_entries(
             stdout,
@@ -360,6 +370,7 @@ fn list_recursive(
             &mut caches.owners,
             &caches.palette,
             snapshot,
+            git_base.as_deref(),
             caches.now,
             caches.umask,
             listing.owner_uid,
@@ -374,7 +385,12 @@ fn list_recursive(
     Ok(had_error)
 }
 
-fn should_descend(entry: &Entry, snapshot: Option<&Snapshot>, options: ListOptions) -> bool {
+fn should_descend(
+    entry: &Entry,
+    git_path: &Path,
+    snapshot: Option<&Snapshot>,
+    options: ListOptions,
+) -> bool {
     let is_hidden = entry.name.as_bytes().first() == Some(&b'.');
     if is_hidden && options.unrestricted < 2 {
         return false;
@@ -384,7 +400,7 @@ fn should_descend(entry: &Entry, snapshot: Option<&Snapshot>, options: ListOptio
     // git's perspective, so trailing-slash exclude rules like `vendor/`
     // must not match it.
     if options.unrestricted < 1
-        && snapshot.is_some_and(|s| s.is_ignored_with_kind(&entry.path, is_real_dir(entry)))
+        && snapshot.is_some_and(|s| s.is_ignored_with_kind(git_path, is_real_dir(entry)))
     {
         return false;
     }
@@ -409,6 +425,7 @@ fn render_entries(
     owners: &mut OwnerCache<SystemDirectory>,
     palette: &Palette,
     snapshot: Option<&Snapshot>,
+    git_base: Option<&Path>,
     now: SystemTime,
     umask: u32,
     dir_owner_uid: Option<u32>,
@@ -418,7 +435,8 @@ fn render_entries(
         .map(|e| build_row(e, owners, palette, now, umask, dir_owner_uid))
         .collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
-        enrich_row(row, entry, palette, snapshot);
+        let git_path = entry_git_path(git_base, entry);
+        enrich_row(row, entry, &git_path, palette, snapshot);
     }
     let git_width = if snapshot.is_some() {
         format::git_col::WIDTH
@@ -460,7 +478,13 @@ fn render_files(
         if snap.is_some() {
             any_git = true;
         }
-        enrich_row(&mut row, entry, &caches.palette, snap);
+        // Top-level args don't share a parent (each may live in a different
+        // directory) and carry the user-typed path in `entry.path`, so resolve
+        // each one directly — unlike directory contents, which key off a
+        // once-canonicalised base via `entry_git_path`.
+        let resolved = git_key(&entry.path);
+        let git_path = resolved.as_deref().unwrap_or(entry.path.as_path());
+        enrich_row(&mut row, entry, git_path, &caches.palette, snap);
         rows.push(row);
     }
     let git_width = if any_git { format::git_col::WIDTH } else { 0 };
@@ -488,8 +512,44 @@ fn containing_dir(path: &Path) -> PathBuf {
     }
 }
 
-fn enrich_row(row: &mut Row, entry: &Entry, palette: &Palette, snapshot: Option<&Snapshot>) {
-    let code = snapshot.map(|s| s.display_code_for(&entry.path, is_real_dir(entry)));
+/// The path used to key an entry's git status. Listing follows a symlinked
+/// directory for display (`freshl b/` where `b -> a` shows `b/file`), so the
+/// git lookup must key descendants by the target path (`a/file`). `git_base`
+/// is the listed directory canonicalised once; joining the leaf onto it
+/// resolves a symlinked ancestor while leaving a leaf that is itself a symlink
+/// to its own status. Without a base (no snapshot, or canonicalisation failed)
+/// fall back to the literal path.
+fn entry_git_path(git_base: Option<&Path>, entry: &Entry) -> PathBuf {
+    git_base.map_or_else(|| entry.path.clone(), |base| base.join(&entry.name))
+}
+
+/// Resolve a top-level path argument to the form used for git-status keying.
+/// A trailing slash dereferences the leaf (`freshl -d b/` reports a symlinked
+/// directory's target status, like `ls -ld b/`); otherwise the parent is
+/// canonicalised and the leaf re-attached, so a symlinked ancestor resolves to
+/// its target while a leaf that is itself a symlink keeps its own status.
+/// `None` when the path can't be resolved, leaving the caller the literal path.
+fn git_key(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().as_bytes().last() == Some(&b'/') {
+        return std::fs::canonicalize(path).ok();
+    }
+    let (parent, name) = (path.parent()?, path.file_name()?);
+    let base = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    Some(std::fs::canonicalize(base).ok()?.join(name))
+}
+
+fn enrich_row(
+    row: &mut Row,
+    entry: &Entry,
+    git_path: &Path,
+    palette: &Palette,
+    snapshot: Option<&Snapshot>,
+) {
+    let code = snapshot.map(|s| s.display_code_for(git_path, is_real_dir(entry)));
     if let Some(c) = code {
         row.git = Some(format::git_col::render(c));
     }
@@ -837,6 +897,31 @@ mod tests {
         // it must not count as a "real" dir.
         e.follow_chain = vec![PathBuf::from("target")];
         assert!(!is_real_dir(&e));
+    }
+
+    #[test]
+    fn git_key_resolves_symlinked_ancestor_and_trailing_slash() {
+        use super::git_key;
+        use std::path::{Path, PathBuf};
+        let dir = tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(root.join("a")).unwrap();
+        fs::write(root.join("a/file"), b"x").unwrap();
+        std::os::unix::fs::symlink("a", root.join("b")).unwrap(); // b -> a
+
+        // A symlinked ancestor resolves to the target path: `b/file` → `a/file`.
+        assert_eq!(git_key(&root.join("b/file")).unwrap(), root.join("a/file"));
+        // Without a trailing slash a leaf symlink keeps its own identity.
+        assert_eq!(git_key(&root.join("b")).unwrap(), root.join("b"));
+        // A trailing slash dereferences the leaf to its target directory.
+        let b_slash = PathBuf::from(format!("{}/b/", root.to_str().unwrap()));
+        assert_eq!(git_key(&b_slash).unwrap(), root.join("a"));
+        // A bare name has an empty parent → resolved against the cwd.
+        assert!(git_key(Path::new("solo")).unwrap().ends_with("solo"));
+        // A path with no leaf name (`freshl ..`) can't be re-keyed → None.
+        assert!(git_key(Path::new("..")).is_none());
+        // An unresolvable parent yields None, leaving the caller the literal path.
+        assert!(git_key(&root.join("missing/file")).is_none());
     }
 
     #[test]

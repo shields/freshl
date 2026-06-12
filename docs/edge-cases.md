@@ -116,6 +116,10 @@ derived independently from git's per-file output in the differential test.
 | Nested `.git` rendered blank              | T            | git.rs `.git` tests                 |
 | Submodule subtree → clean                 | T (gap test) | gaps.rs (submodule e2e)             |
 | Symlinked workdir (`/var`→`/private/var`) | T            | git.rs `relativize` tests           |
+| Symlinked dir argument contents           | T            | integration.rs (+ lib.rs `git_key`) |
+| Symlink chain dir argument contents       | T            | integration.rs                      |
+| `-d` symlinked dir with trailing slash    | T            | integration.rs (+ lib.rs `git_key`) |
+| Symlinked dir target outside any repo     | T            | integration.rs                      |
 | `freshl ..` / `..`-containing paths       | T            | git.rs relativize tests             |
 | Bare repo (no workdir)                    | T            | snapshot cache negative path        |
 | Secondary worktree (`git worktree`)       | T (gap test) | gaps.rs (linkfile + worktree index) |

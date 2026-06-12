@@ -23,7 +23,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use tempfile::tempdir;
@@ -153,6 +153,142 @@ fn git_repo_tracks_clean_files() {
     assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
     assert!(out.contains("kept"));
     assert!(out.contains('○'));
+}
+
+#[test]
+fn git_repo_symlinked_directory_contents_use_target_status() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::create_dir_all(dir.path().join("a/sub")).unwrap();
+    fs::write(dir.path().join("a/file"), b"tracked").unwrap();
+    fs::write(dir.path().join("a/sub/nested"), b"nested").unwrap();
+    fs::write(dir.path().join(".gitignore"), b"build/\n").unwrap();
+    run_git(dir.path(), &["add", "a/file", "a/sub/nested", ".gitignore"]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+    fs::create_dir(dir.path().join("a/build")).unwrap();
+    fs::write(dir.path().join("a/build/cache"), b"ignored").unwrap();
+    std::os::unix::fs::symlink("a", dir.path().join("b")).unwrap();
+    std::os::unix::fs::symlink("b", dir.path().join("c")).unwrap();
+
+    let canonical = fs::canonicalize(dir.path()).unwrap();
+    let b_arg = PathBuf::from(format!("{}/b/", canonical.to_str().unwrap()));
+    let c_arg = PathBuf::from(format!("{}/c/", canonical.to_str().unwrap()));
+    let assert_clean_file = |label: &str, path: &Path| {
+        let (code, out, err) = run_paths(&[path]);
+        assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+        assert!(err.is_empty(), "{label} listing stderr: {err}");
+        let line = out
+            .lines()
+            .find(|l| l.contains("file"))
+            .unwrap_or_else(|| panic!("{label} row for file missing in: {out}"));
+        assert!(
+            line.contains('○'),
+            "{label} tracked file through symlinked dir should be clean: {line}"
+        );
+        assert!(
+            !line.contains('?'),
+            "{label} tracked file through symlinked dir must not be untracked: {line}"
+        );
+    };
+
+    assert_clean_file("unstaged symlink", b_arg.as_path());
+    assert_clean_file("symlink chain", c_arg.as_path());
+
+    let (code, out, err) = run_args(&["-R", b_arg.to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(err.is_empty(), "recursive listing stderr: {err}");
+    let nested = out
+        .lines()
+        .find(|l| l.contains("nested"))
+        .unwrap_or_else(|| panic!("recursive nested row missing in: {out}"));
+    assert!(
+        nested.contains('○'),
+        "recursive tracked file through symlinked dir should be clean: {nested}"
+    );
+    let build = out
+        .lines()
+        .find(|l| l.contains("build"))
+        .unwrap_or_else(|| panic!("ignored build row missing in: {out}"));
+    assert!(
+        build.contains('·'),
+        "ignored dir through symlinked dir should stay ignored: {build}"
+    );
+    assert!(
+        !out.contains("cache"),
+        "recursive listing should not descend into ignored dir by default: {out}"
+    );
+
+    run_git(dir.path(), &["add", "b"]);
+    assert_clean_file("staged symlink", b_arg.as_path());
+}
+
+#[test]
+fn git_repo_symlinked_directory_to_non_repo_has_no_git_column() {
+    let dir = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::write(dir.path().join("seed"), b"tracked").unwrap();
+    run_git(dir.path(), &["add", "seed"]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+    fs::write(outside.path().join("external"), b"outside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("x")).unwrap();
+
+    let canonical = fs::canonicalize(dir.path()).unwrap();
+    let x_arg = PathBuf::from(format!("{}/x/", canonical.to_str().unwrap()));
+    let (code, out, err) = run_paths(&[x_arg.as_path()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(err.is_empty(), "outside listing stderr: {err}");
+    let line = out
+        .lines()
+        .find(|l| l.contains("external"))
+        .unwrap_or_else(|| panic!("external row missing in: {out}"));
+    assert!(
+        !['?', '○', '·', '⋯', '+']
+            .iter()
+            .any(|glyph| line.contains(*glyph)),
+        "non-repo symlink target should not render a git glyph: {line}"
+    );
+}
+
+#[test]
+fn git_repo_directory_flag_trailing_slash_symlink_uses_target_status() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::create_dir(dir.path().join("a")).unwrap();
+    fs::write(dir.path().join("a/file"), b"tracked").unwrap();
+    run_git(dir.path(), &["add", "a/file"]);
+    run_git(dir.path(), &["commit", "-m", "init"]);
+    std::os::unix::fs::symlink("a", dir.path().join("b")).unwrap();
+
+    let canonical = fs::canonicalize(dir.path()).unwrap();
+    let b = PathBuf::from(format!("{}/b", canonical.to_str().unwrap()));
+    let b_slash = PathBuf::from(format!("{}/b/", canonical.to_str().unwrap()));
+
+    let (code, out, err) = run_args(&["-d", b.to_str().unwrap()]);
+    assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+    assert!(err.is_empty(), "symlink row stderr: {err}");
+    assert!(
+        out.contains('?') && out.contains('→'),
+        "`freshl -d b` should render the untracked symlink entry: {out}"
+    );
+
+    let assert_target_dir = |label: &str| {
+        let (code, out, err) = run_args(&["-d", b_slash.to_str().unwrap()]);
+        assert_eq!(code_repr(code), code_repr(ExitCode::SUCCESS));
+        assert!(err.is_empty(), "{label} target row stderr: {err}");
+        assert!(
+            out.contains('○'),
+            "{label} `freshl -d b/` should render the clean target directory: {out}"
+        );
+        assert!(
+            !out.contains('?') && !out.contains('+') && !out.contains('→'),
+            "{label} `freshl -d b/` should not render the symlink entry status/name: {out}"
+        );
+    };
+
+    assert_target_dir("unstaged symlink");
+    run_git(dir.path(), &["add", "b"]);
+    assert_target_dir("staged symlink");
 }
 
 #[test]

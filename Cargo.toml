@@ -36,7 +36,7 @@ rustix = { version = "1", default-features = false, features = ["process", "fs"]
 uzers = "0.12"
 
 [dependencies.gix]
-version = "0.84"
+version = "0.85"
 default-features = false
 features = [
     "status",

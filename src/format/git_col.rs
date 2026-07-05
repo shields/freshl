@@ -19,14 +19,14 @@ use crate::git::PorcelainCode;
 pub const WIDTH: usize = 1;
 
 #[must_use]
-pub fn render(code: PorcelainCode) -> String {
-    let style = style_for(code);
+pub fn render(code: PorcelainCode, dim: Style) -> String {
+    let style = style_for(code, dim);
     format!("{style}{}{}", code.glyph(), style.render_reset())
 }
 
-const fn style_for(code: PorcelainCode) -> Style {
+const fn style_for(code: PorcelainCode, dim: Style) -> Style {
     match code {
-        PorcelainCode::CLEAN | PorcelainCode::IGNORED => return Style::new().dimmed(),
+        PorcelainCode::CLEAN | PorcelainCode::IGNORED => return dim,
         PorcelainCode::UNTRACKED => {
             return Style::new().fg_color(Some(Color::Ansi(AnsiColor::Magenta)));
         }
@@ -62,10 +62,26 @@ const fn style_for(code: PorcelainCode) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use anstyle::{AnsiColor, Color, Effects};
+    use anstyle::{Ansi256Color, AnsiColor, Color, Effects, Style};
 
-    use super::{render, style_for};
+    use super::{render as render_with_dim, style_for as style_for_with_dim};
     use crate::git::PorcelainCode;
+
+    fn dim() -> Style {
+        Style::new().dimmed()
+    }
+
+    fn gray_dim() -> Style {
+        Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(243))))
+    }
+
+    fn render(code: PorcelainCode) -> String {
+        render_with_dim(code, dim())
+    }
+
+    fn style_for(code: PorcelainCode) -> Style {
+        style_for_with_dim(code, dim())
+    }
 
     fn hue_of(code: PorcelainCode) -> Option<Color> {
         style_for(code).get_fg_color()
@@ -103,6 +119,19 @@ mod tests {
     fn clean_and_ignored_are_dimmed() {
         assert!(is_dimmed(PorcelainCode::CLEAN));
         assert!(is_dimmed(PorcelainCode::IGNORED));
+    }
+
+    #[test]
+    fn clean_and_ignored_use_supplied_dim_style() {
+        let dim = gray_dim();
+        assert_eq!(style_for_with_dim(PorcelainCode::CLEAN, dim), dim);
+        assert_eq!(style_for_with_dim(PorcelainCode::IGNORED, dim), dim);
+
+        let rendered = render_with_dim(PorcelainCode::CLEAN, dim);
+        assert!(
+            rendered.starts_with(&format!("{dim}")),
+            "clean glyph should open with supplied dim style: {rendered:?}",
+        );
     }
 
     #[test]

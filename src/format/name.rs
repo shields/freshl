@@ -32,15 +32,19 @@ use crate::format::palette::Palette;
 /// (`or`) color and the unresolved final hop in `mi` (or red when `mi` is
 /// unset).
 #[must_use]
-pub fn format_name(palette: &Palette, entry: &Entry, dim_if_ignored: bool) -> Vec<u8> {
+pub fn format_name(palette: &Palette, entry: &Entry, dim_if_ignored: bool, dim: Style) -> Vec<u8> {
     let base = palette.style_for(entry);
-    let dim = Style::new().effects(Effects::DIMMED);
     let red = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Red)));
     let overlay = |s: Style| {
         if dim_if_ignored {
-            // OR DIMMED onto whatever the palette already set (bold, fg, …)
-            // so the dim cue doesn't overwrite the type/extension styling.
-            s.effects(s.get_effects() | Effects::DIMMED)
+            if s.get_fg_color().is_some() {
+                // OR DIMMED onto palette-colored names so the ignore cue
+                // doesn't overwrite the type/extension styling.
+                s.effects(s.get_effects() | Effects::DIMMED)
+            } else {
+                s.fg_color(dim.get_fg_color())
+                    .effects(s.get_effects() | dim.get_effects())
+            }
         } else {
             s
         }
@@ -96,9 +100,10 @@ pub fn format_name(palette: &Palette, entry: &Entry, dim_if_ignored: bool) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use super::format_name;
+    use super::format_name as format_name_with_dim;
     use crate::entry::{Entry, EntryKind};
     use crate::format::palette::Palette;
+    use anstyle::{Ansi256Color, Color, Effects, Style};
     use std::ffi::OsString;
     use std::path::PathBuf;
     use std::time::SystemTime;
@@ -123,6 +128,18 @@ mod tests {
 
     fn as_lossy(bytes: &[u8]) -> String {
         String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    fn dim() -> Style {
+        Style::new().effects(Effects::DIMMED)
+    }
+
+    fn gray_dim() -> Style {
+        Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(249))))
+    }
+
+    fn format_name(palette: &Palette, entry: &Entry, dim_if_ignored: bool) -> Vec<u8> {
+        format_name_with_dim(palette, entry, dim_if_ignored, dim())
     }
 
     #[test]
@@ -180,9 +197,21 @@ mod tests {
     fn ignored_files_get_dim_style() {
         let palette = Palette::empty();
         let e = entry("ignored", EntryKind::RegularFile);
-        let dim = format_name(&palette, &e, true);
+        let dimmed = format_name(&palette, &e, true);
         let plain = format_name(&palette, &e, false);
-        assert_ne!(plain, dim);
+        assert_ne!(plain, dimmed);
+    }
+
+    #[test]
+    fn ignored_uncolored_files_use_supplied_dim_style() {
+        let palette = Palette::empty();
+        let e = entry("ignored", EntryKind::RegularFile);
+        let dim = gray_dim();
+        let s = as_lossy(&format_name_with_dim(&palette, &e, true, dim));
+        assert!(
+            s.starts_with(&format!("{dim}ignored")),
+            "ignored uncolored name should use supplied dim style: {s}",
+        );
     }
 
     #[test]
@@ -197,6 +226,19 @@ mod tests {
             "blue fg should survive dim overlay: {dim}"
         );
         assert!(dim.contains('2'), "dim effect should be present: {dim}");
+    }
+
+    #[test]
+    fn symlink_arrows_use_supplied_dim_style() {
+        let palette = Palette::empty();
+        let mut e = entry("link", EntryKind::RegularFile);
+        e.follow_chain = vec![PathBuf::from("target")];
+        let dim = gray_dim();
+        let s = as_lossy(&format_name_with_dim(&palette, &e, false, dim));
+        assert!(
+            s.contains(&format!("{dim} → {}", dim.render_reset())),
+            "arrow should be wrapped in supplied dim style: {s}",
+        );
     }
 
     #[test]

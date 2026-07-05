@@ -53,6 +53,7 @@ struct Caches {
     sensitivity: DetectorCache<ProbeDetector>,
     snapshots: SnapshotCache,
     palette: Palette,
+    dim: anstyle::Style,
     /// Captured once per invocation so every row's mtime is dimmed against the
     /// same reference point — no skew if a long listing crosses a minute/hour
     /// boundary mid-render.
@@ -69,6 +70,7 @@ impl Caches {
             sensitivity: DetectorCache::new(ProbeDetector),
             snapshots: SnapshotCache::new(),
             palette: Palette::from_env(),
+            dim: format::dim_style::from_env(),
             now: SystemTime::now(),
             umask: read_umask(),
         }
@@ -255,6 +257,7 @@ fn list_directory(
         git_base.as_deref(),
         caches.now,
         caches.umask,
+        caches.dim,
         listing.owner_uid,
     )?;
     Ok(report_listing_errors(stderr, &listing.errors))
@@ -373,6 +376,7 @@ fn list_recursive(
             git_base.as_deref(),
             caches.now,
             caches.umask,
+            caches.dim,
             listing.owner_uid,
         )?;
         had_error |= report_listing_errors(stderr, &listing.errors);
@@ -428,22 +432,23 @@ fn render_entries(
     git_base: Option<&Path>,
     now: SystemTime,
     umask: u32,
+    dim: anstyle::Style,
     dir_owner_uid: Option<u32>,
 ) -> Result<(), Error> {
     let mut rows: Vec<Row> = entries
         .iter()
-        .map(|e| build_row(e, owners, palette, now, umask, dir_owner_uid))
+        .map(|e| build_row(e, owners, palette, now, umask, dir_owner_uid, dim))
         .collect();
     for (row, entry) in rows.iter_mut().zip(entries.iter()) {
         let git_path = entry_git_path(git_base, entry);
-        enrich_row(row, entry, &git_path, palette, snapshot);
+        enrich_row(row, entry, &git_path, palette, snapshot, dim);
     }
     let git_width = if snapshot.is_some() {
         format::git_col::WIDTH
     } else {
         0
     };
-    write_rows(stdout, &rows, git_width)
+    write_rows(stdout, &rows, git_width, dim)
 }
 
 fn render_files(
@@ -458,6 +463,7 @@ fn render_files(
     let mut any_git = false;
     let now = caches.now;
     let umask = caches.umask;
+    let dim = caches.dim;
     // Each argument may sit in a different directory, so its owner is dimmed
     // against the owner of its containing directory. Cache by directory so a
     // glob of same-directory arguments costs one stat, not one per file.
@@ -473,6 +479,7 @@ fn render_files(
             now,
             umask,
             dir_owner_uid,
+            dim,
         );
         let snap = caches.snapshots.for_target(&entry.path);
         if snap.is_some() {
@@ -484,11 +491,11 @@ fn render_files(
         // once-canonicalised base via `entry_git_path`.
         let resolved = git_key(&entry.path);
         let git_path = resolved.as_deref().unwrap_or(entry.path.as_path());
-        enrich_row(&mut row, entry, git_path, &caches.palette, snap);
+        enrich_row(&mut row, entry, git_path, &caches.palette, snap, dim);
         rows.push(row);
     }
     let git_width = if any_git { format::git_col::WIDTH } else { 0 };
-    write_rows(stdout, &rows, git_width)
+    write_rows(stdout, &rows, git_width, dim)
 }
 
 /// The directory that contains `path`, for owner-column dimming.
@@ -548,23 +555,29 @@ fn enrich_row(
     git_path: &Path,
     palette: &Palette,
     snapshot: Option<&Snapshot>,
+    dim: anstyle::Style,
 ) {
     let code = snapshot.map(|s| s.display_code_for(git_path, is_real_dir(entry)));
     if let Some(c) = code {
-        row.git = Some(format::git_col::render(c));
+        row.git = Some(format::git_col::render(c, dim));
     }
     // `build_row` already rendered the name (including the broken-link arrow and
     // dimmed columns, which it derives from the entry's kind). Only the
     // git-derived "ignored" dimming is unknown until now, so re-render for that.
     if code == Some(PorcelainCode::IGNORED) {
-        row.name = format::name::format_name(palette, entry, true);
+        row.name = format::name::format_name(palette, entry, true, dim);
     }
 }
 
-fn write_rows(stdout: &mut dyn Write, rows: &[Row], git_width: usize) -> Result<(), Error> {
+fn write_rows(
+    stdout: &mut dyn Write,
+    rows: &[Row],
+    git_width: usize,
+    dim: anstyle::Style,
+) -> Result<(), Error> {
     let widths = compute_widths(rows);
     for row in rows {
-        let line = render_row(row, widths, git_width);
+        let line = render_row(row, widths, git_width, dim);
         stdout.write_all(&line).map_err(stdout_io)?;
         stdout.write_all(b"\n").map_err(stdout_io)?;
     }

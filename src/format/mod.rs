@@ -15,12 +15,13 @@
 use std::io::Write;
 use std::time::SystemTime;
 
-use anstyle::{Effects, Style};
+use anstyle::Style;
 
 use crate::entry::{Entry, EntryKind};
 use crate::format::palette::Palette;
 use crate::owner::{OwnerCache, UserDirectory};
 
+pub(crate) mod dim_style;
 pub mod git_col;
 pub mod name;
 pub mod palette;
@@ -86,8 +87,8 @@ pub fn build_row<D: UserDirectory>(
     now: SystemTime,
     umask: u32,
     dir_owner_uid: Option<u32>,
+    dim: Style,
 ) -> Row {
-    let dim = Style::new().effects(Effects::DIMMED);
     let broken = entry.is_broken_link();
     let (size, size_width) = match entry.kind {
         EntryKind::CharDevice | EntryKind::BlockDevice => size::format_rdev(entry.rdev),
@@ -123,7 +124,7 @@ pub fn build_row<D: UserDirectory>(
         size_width,
         mtime: time::format_time_styled(entry.mtime, now, dim),
         git: None,
-        name: name::format_name(palette, entry, false),
+        name: name::format_name(palette, entry, false, dim),
     }
 }
 
@@ -161,9 +162,8 @@ fn wrap_dim(out: &mut Vec<u8>, on: bool, dim: Style, body: impl FnOnce(&mut Vec<
 }
 
 #[must_use]
-pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> {
+pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize, dim: Style) -> Vec<u8> {
     let mut out = Vec::with_capacity(row.name.len() + 96);
-    let dim = Style::new().effects(Effects::DIMMED);
     wrap_dim(&mut out, row.dim_mode, dim, |out| {
         let _ = write!(out, "{}", row.kind);
         let _ = write!(out, "{:>w$}", row.mode, w = widths.mode);
@@ -201,7 +201,10 @@ pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnWidths, Row, build_row, compute_widths, render_row};
+    use super::{
+        ColumnWidths, Row, build_row as build_row_with_dim, compute_widths,
+        render_row as render_row_with_dim,
+    };
     use crate::entry::{Entry, EntryKind};
     use crate::format::palette::Palette;
     use crate::owner::{OwnerCache, UserDirectory, UserRecord};
@@ -239,6 +242,25 @@ mod tests {
             ino: 0,
             follow_chain: Vec::new(),
         }
+    }
+
+    fn dim() -> Style {
+        Style::new().effects(Effects::DIMMED)
+    }
+
+    fn build_row<D: UserDirectory>(
+        entry: &Entry,
+        owners: &mut OwnerCache<D>,
+        palette: &Palette,
+        now: SystemTime,
+        umask: u32,
+        dir_owner_uid: Option<u32>,
+    ) -> Row {
+        build_row_with_dim(entry, owners, palette, now, umask, dir_owner_uid, dim())
+    }
+
+    fn render_row(row: &Row, widths: ColumnWidths, git_width: usize) -> Vec<u8> {
+        render_row_with_dim(row, widths, git_width, dim())
     }
 
     #[test]

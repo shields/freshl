@@ -19,14 +19,14 @@ use crate::git::PorcelainCode;
 pub const WIDTH: usize = 1;
 
 #[must_use]
-pub fn render(code: PorcelainCode, dim: Style) -> String {
-    let style = style_for(code, dim);
+pub fn render(code: PorcelainCode) -> String {
+    let style = style_for(code);
     format!("{style}{}{}", code.glyph(), style.render_reset())
 }
 
-const fn style_for(code: PorcelainCode, dim: Style) -> Style {
+const fn style_for(code: PorcelainCode) -> Style {
     match code {
-        PorcelainCode::CLEAN | PorcelainCode::IGNORED => return dim,
+        PorcelainCode::CLEAN | PorcelainCode::IGNORED => return Style::new(),
         PorcelainCode::UNTRACKED => {
             return Style::new().fg_color(Some(Color::Ansi(AnsiColor::Magenta)));
         }
@@ -62,26 +62,10 @@ const fn style_for(code: PorcelainCode, dim: Style) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use anstyle::{Ansi256Color, AnsiColor, Color, Effects, Style};
+    use anstyle::{AnsiColor, Color, Effects, Style};
 
-    use super::{render as render_with_dim, style_for as style_for_with_dim};
+    use super::{render, style_for};
     use crate::git::PorcelainCode;
-
-    fn dim() -> Style {
-        Style::new().dimmed()
-    }
-
-    fn gray_dim() -> Style {
-        Style::new().fg_color(Some(Color::Ansi256(Ansi256Color(243))))
-    }
-
-    fn render(code: PorcelainCode) -> String {
-        render_with_dim(code, dim())
-    }
-
-    fn style_for(code: PorcelainCode) -> Style {
-        style_for_with_dim(code, dim())
-    }
 
     fn hue_of(code: PorcelainCode) -> Option<Color> {
         style_for(code).get_fg_color()
@@ -89,10 +73,6 @@ mod tests {
 
     fn is_bold(code: PorcelainCode) -> bool {
         style_for(code).get_effects().contains(Effects::BOLD)
-    }
-
-    fn is_dimmed(code: PorcelainCode) -> bool {
-        style_for(code).get_effects().contains(Effects::DIMMED)
     }
 
     #[test]
@@ -116,22 +96,11 @@ mod tests {
     }
 
     #[test]
-    fn clean_and_ignored_are_dimmed() {
-        assert!(is_dimmed(PorcelainCode::CLEAN));
-        assert!(is_dimmed(PorcelainCode::IGNORED));
-    }
-
-    #[test]
-    fn clean_and_ignored_use_supplied_dim_style() {
-        let dim = gray_dim();
-        assert_eq!(style_for_with_dim(PorcelainCode::CLEAN, dim), dim);
-        assert_eq!(style_for_with_dim(PorcelainCode::IGNORED, dim), dim);
-
-        let rendered = render_with_dim(PorcelainCode::CLEAN, dim);
-        assert!(
-            rendered.starts_with(&format!("{dim}")),
-            "clean glyph should open with supplied dim style: {rendered:?}",
-        );
+    fn clean_and_ignored_are_plain() {
+        assert_eq!(style_for(PorcelainCode::CLEAN), Style::new());
+        assert_eq!(style_for(PorcelainCode::IGNORED), Style::new());
+        assert_eq!(render(PorcelainCode::CLEAN), "○");
+        assert_eq!(render(PorcelainCode::IGNORED), "·");
     }
 
     #[test]
@@ -212,7 +181,6 @@ mod tests {
             hue_of(PorcelainCode::DIRTY_SUBTREE),
             Some(Color::Ansi(AnsiColor::Cyan))
         );
-        assert!(!is_dimmed(PorcelainCode::DIRTY_SUBTREE));
     }
 
     #[test]

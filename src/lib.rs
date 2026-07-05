@@ -559,7 +559,7 @@ fn enrich_row(
 ) {
     let code = snapshot.map(|s| s.display_code_for(git_path, is_real_dir(entry)));
     if let Some(c) = code {
-        row.git = Some(format::git_col::render(c, dim));
+        row.git = Some(format::git_col::render(c));
     }
     // `build_row` already rendered the name (including the broken-link arrow and
     // dimmed columns, which it derives from the entry's kind). Only the

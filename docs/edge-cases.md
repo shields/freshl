@@ -145,7 +145,7 @@ derived independently from git's per-file output in the differential test.
 | No-exec dir (`0o400`, stat fails per child) | T      | lib.rs per-child-failure tests  |
 | Mode == dimming default vs not              | T      | format/perms.rs tests           |
 | setuid / setgid / sticky                    | T      | format/perms.rs tests           |
-| Hardlinked (nlink > 1)                      | T      | format/mod.rs `dim_nlink` tests |
+| Hardlinked (nlink > 1)                      | T      | format/palette.rs tests         |
 | gid is/ isn't owner's primary               | T      | format/mod.rs `dim_group` tests |
 | Foreign uid/gid (no passwd entry)           | T      | owner.rs tests                  |
 | POSIX ACLs / xattrs / SELinux               | U      | not part of the one-line layout |

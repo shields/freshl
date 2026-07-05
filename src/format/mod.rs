@@ -39,10 +39,6 @@ pub struct ColumnWidths {
 }
 
 #[derive(Debug, Clone)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "four independent per-column dim hints (mode, nlink, owner, group), not a state machine"
-)]
 pub struct Row {
     pub kind: char,
     pub mode: String,
@@ -52,10 +48,6 @@ pub struct Row {
     /// keeps the eye on rows with anything unusual.
     pub dim_mode: bool,
     pub nlink: String,
-    /// Wrap `nlink` in dim escapes at render time when the count is 1 — the
-    /// overwhelming default for regular files, so dimming it lets the eye
-    /// catch hardlinked entries.
-    pub dim_nlink: bool,
     pub owner: String,
     /// Wrap the owner column in dim escapes at render time when the uid matches
     /// the owner of the containing directory — that column then carries no
@@ -115,7 +107,6 @@ pub fn build_row<D: UserDirectory>(
         mode,
         dim_mode,
         nlink: entry.nlink.to_string(),
-        dim_nlink: entry.nlink == 1,
         owner: owners.user(entry.uid).to_string_lossy().into_owned(),
         dim_owner,
         group: owners.group(entry.gid).to_string_lossy().into_owned(),
@@ -169,7 +160,7 @@ pub fn render_row(row: &Row, widths: ColumnWidths, git_width: usize, dim: Style)
         let _ = write!(out, "{:>w$}", row.mode, w = widths.mode);
     });
     out.push(b' ');
-    wrap_dim(&mut out, row.dim_nlink, dim, |out| {
+    wrap_dim(&mut out, true, dim, |out| {
         let _ = write!(out, "{:>w$}", row.nlink, w = widths.nlink);
     });
     out.push(b' ');
@@ -305,7 +296,6 @@ mod tests {
         assert_eq!(row.mode, "644");
         assert!(row.dim_mode);
         assert_eq!(row.nlink, "1");
-        assert!(row.dim_nlink);
         assert_eq!(row.owner, "alice");
         assert_eq!(row.group, "staff");
         assert!(row.dim_group);
@@ -333,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn build_row_clears_dim_nlink_for_hardlinked_entry() {
+    fn build_row_populates_hardlinked_nlink() {
         let mut owners = OwnerCache::new(Fixed);
         let palette = Palette::empty();
         let mut e = entry("hi");
@@ -347,7 +337,6 @@ mod tests {
             None,
         );
         assert_eq!(row.nlink, "2");
-        assert!(!row.dim_nlink);
     }
 
     #[test]
@@ -495,7 +484,6 @@ mod tests {
                 mode: "644".into(),
                 dim_mode: false,
                 nlink: "1".into(),
-                dim_nlink: false,
                 owner: "x".into(),
                 dim_owner: false,
                 group: "staff".into(),
@@ -511,7 +499,6 @@ mod tests {
                 mode: "4755".into(),
                 dim_mode: false,
                 nlink: "99".into(),
-                dim_nlink: false,
                 owner: "longer".into(),
                 dim_owner: false,
                 group: "g".into(),
@@ -545,7 +532,6 @@ mod tests {
             mode: "755".into(),
             dim_mode: false,
             nlink: "2".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),
@@ -564,7 +550,16 @@ mod tests {
             size: 9,
         };
         let s = render_row(&row, widths, 0);
-        assert!(s.starts_with(b"d 755  2 alice   staff "));
+        let dim = Style::new().effects(Effects::DIMMED);
+        let open = format!("{dim}");
+        let close = format!("{}", dim.render_reset());
+        let expected_nlink = format!("{open} 2{close} alice");
+        assert!(s.starts_with(b"d 755 "));
+        assert!(
+            s.windows(expected_nlink.len())
+                .any(|w| w == expected_nlink.as_bytes()),
+            "row should dim the padded link count: {s:?}",
+        );
         assert!(s.ends_with(b"src"));
     }
 
@@ -575,7 +570,6 @@ mod tests {
             mode: "755".into(),
             dim_mode: true,
             nlink: "2".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),
@@ -605,13 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn render_row_omits_dim_escapes_when_flag_unset() {
+    fn render_row_only_dims_nlink_when_other_flags_unset() {
         let row = Row {
             kind: 'd',
             mode: "755".into(),
             dim_mode: false,
             nlink: "2".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),
@@ -632,20 +625,21 @@ mod tests {
         let s = render_row(&row, widths, 0);
         let dim = Style::new().effects(Effects::DIMMED);
         let open = format!("{dim}");
-        assert!(
-            !s.windows(open.len()).any(|w| w == open.as_bytes()),
-            "no dim escape expected: {s:?}",
-        );
+        let dim_count = s
+            .windows(open.len())
+            .filter(|w| *w == open.as_bytes())
+            .count();
+        assert_eq!(dim_count, 1, "only nlink should be dimmed: {s:?}");
+        assert!(s.starts_with(b"d755 "), "mode should not be dimmed: {s:?}");
     }
 
     #[test]
-    fn render_row_wraps_nlink_in_dim_when_flagged() {
+    fn render_row_wraps_nlink_in_dim() {
         let row = Row {
             kind: '-',
             mode: "644".into(),
             dim_mode: false,
-            nlink: "1".into(),
-            dim_nlink: true,
+            nlink: "2".into(),
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),
@@ -667,7 +661,7 @@ mod tests {
         let dim = Style::new().effects(Effects::DIMMED);
         let open = format!("{dim}");
         let close = format!("{}", dim.render_reset());
-        let expected = format!("{open} 1{close} ");
+        let expected = format!("{open} 2{close} ");
         assert!(
             s.windows(expected.len()).any(|w| w == expected.as_bytes()),
             "row should open dim before padded nlink, close after: {s:?}",
@@ -681,7 +675,6 @@ mod tests {
             mode: "644".into(),
             dim_mode: false,
             nlink: "1".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),
@@ -717,7 +710,6 @@ mod tests {
             mode: "644".into(),
             dim_mode: false,
             nlink: "1".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: true,
             group: "staff".into(),
@@ -753,7 +745,6 @@ mod tests {
             mode: "644".into(),
             dim_mode: false,
             nlink: "1".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),
@@ -786,7 +777,6 @@ mod tests {
             mode: "644".into(),
             dim_mode: false,
             nlink: "1".into(),
-            dim_nlink: false,
             owner: "alice".into(),
             dim_owner: false,
             group: "staff".into(),

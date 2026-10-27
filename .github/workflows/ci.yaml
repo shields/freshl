@@ -46,7 +46,7 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt
+      - run: rustup show active-toolchain
       - run: make lint PRETTIER='npx --yes prettier'
       - run: make test
 
@@ -79,9 +79,9 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-coverage-
-      - run: rustup toolchain install $NIGHTLY --profile minimal --component llvm-tools-preview
-      - run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version $CARGO_LLVM_COV_VERSION
-      - run: make coverage NIGHTLY=$NIGHTLY
+      - run: rustup toolchain install "$NIGHTLY" --profile minimal --component llvm-tools-preview
+      - run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version "$CARGO_LLVM_COV_VERSION"
+      - run: make coverage NIGHTLY="$NIGHTLY"
 
   zizmor:
     name: zizmor

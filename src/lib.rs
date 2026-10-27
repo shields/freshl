@@ -715,7 +715,7 @@ mod tests {
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("Usage: freshl"));
-        assert!(err.is_empty());
+        assert_eq!(err, b"");
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod tests {
         let mut err = Vec::new();
         let code = run(os(&["--bogus"]), &mut out, &mut err);
         assert_eq!(code_repr(code), code_repr(std::process::ExitCode::from(2)));
-        assert!(out.is_empty());
+        assert_eq!(out, b"");
     }
 
     #[test]

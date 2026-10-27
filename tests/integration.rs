@@ -689,7 +689,7 @@ fn nonexistent_path_emits_error_and_exits_one() {
     let missing = dir.path().join("nope");
     let (code, _out, err) = run_paths(&[&missing]);
     assert_eq!(code_repr(code), code_repr(ExitCode::from(1)));
-    assert!(!err.is_empty());
+    assert_ne!(err, "");
 }
 
 fn run_args(items: &[&str]) -> (ExitCode, String, String) {

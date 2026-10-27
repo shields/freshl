@@ -389,7 +389,7 @@ mod tests {
         fs::write(&file, b"x").unwrap();
         let entry = entry_for_path(&file).unwrap();
         assert_eq!(entry.kind, EntryKind::RegularFile);
-        assert!(entry.follow_chain.is_empty());
+        assert_eq!(entry.follow_chain, Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -399,7 +399,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let regular = dir.path().join("plain");
         fs::write(&regular, b"").unwrap();
-        assert!(build_follow_chain(&regular).is_empty());
+        assert_eq!(build_follow_chain(&regular), Vec::<PathBuf>::new());
     }
 
     #[test]

@@ -43,7 +43,7 @@ features = [
     "index",
     "worktree-mutation",
     "excludes",
-    "max-performance-safe",
+    "max-performance",
     "sha1",
 ]
 
@@ -60,7 +60,7 @@ all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
-multiple-crate-versions = "allow"
+multiple_crate_versions = "allow"
 
 # Restriction lints: opt in by name. Grouped per
 # https://emschwartz.me/your-clippy-config-should-be-stricter/.

@@ -30,7 +30,9 @@ output the oldest files last. `-rr` or `-rrrr` will have no effect, but you can
 
 `-R` skips gitignored and dotfile dirs by default. Like `ripgrep`, `-u` lifts
 that one level at a time: `-u` descends into gitignored dirs, and `-uu` also
-descends into dotfile dirs.
+descends into dotfile dirs. If the starting directory is itself gitignored, `-R`
+automatically descends into gitignored dirs for that listing. This applies to
+both the current directory and explicit path arguments.
 
 Symlinks are always followed: a row reads `name → target` (or
 `name → mid → target` for multi-hop), with the final target in its natural

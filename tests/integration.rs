@@ -783,6 +783,42 @@ fn recursive_lists_nested_blocks_with_labels() {
 }
 
 #[test]
+fn recursive_from_gitignored_directory_descends_without_unrestricted() {
+    let dir = tempdir().unwrap();
+    init_repo(dir.path());
+    fs::write(dir.path().join(".gitignore"), b"/out/\n").unwrap();
+    let out = dir.path().join("out/firedancer");
+    let sessions = out.join("sessions/2026/10/27");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(sessions.join("rollout.jsonl"), b"x").unwrap();
+    fs::create_dir(sessions.join(".hidden")).unwrap();
+    fs::write(sessions.join(".hidden/secret"), b"x").unwrap();
+    std::os::unix::fs::symlink(&out, dir.path().join("alias")).unwrap();
+
+    for (cwd, args, include_hidden) in [
+        (dir.path(), vec!["-R", out.to_str().unwrap()], false),
+        (dir.path(), vec!["-R", "out/firedancer/sessions/.."], false),
+        (out.as_path(), vec!["-R"], false),
+        (out.as_path(), vec!["-R", "sessions"], false),
+        (dir.path(), vec!["-R", "alias"], false),
+        (out.as_path(), vec!["-Ru"], false),
+        (out.as_path(), vec!["-Ruu"], true),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_freshl"))
+            .current_dir(cwd)
+            .args(&args)
+            .output()
+            .unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        let err = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{cwd:?} {args:?}: {err}");
+        assert!(err.is_empty(), "{cwd:?} {args:?}: {err}");
+        assert!(text.contains("rollout.jsonl"), "{cwd:?} {args:?}: {text}");
+        assert_eq!(text.contains("secret"), include_hidden, "{args:?}: {text}");
+    }
+}
+
+#[test]
 fn recursive_with_time_sort_still_recurses() {
     let dir = tempdir().unwrap();
     let sub = dir.path().join("sub");

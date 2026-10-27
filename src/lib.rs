@@ -292,7 +292,7 @@ fn list_recursive(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     root: &Path,
-    options: ListOptions,
+    mut options: ListOptions,
     caches: &mut Caches,
 ) -> Result<bool, Error> {
     let mut stack: VecDeque<(PathBuf, Vec<Inode>)> = VecDeque::new();
@@ -336,7 +336,6 @@ fn list_recursive(
         if !first {
             writeln!(stdout).map_err(stdout_io)?;
         }
-        first = false;
         write_path_with_suffix(stdout, &target, b":\n")?;
         let mut entries = listing.entries;
         let sense = {
@@ -350,6 +349,13 @@ fn list_recursive(
         // git status by the real path. Resolving here keeps each per-row git
         // lookup a lexical strip rather than a `canonicalize` syscall.
         let git_base = snapshot.and_then(|_| std::fs::canonicalize(&target).ok());
+        if first
+            && let Some(root_path) = git_base.as_deref()
+            && snapshot.is_some_and(|s| s.is_ignored_with_kind(root_path, true))
+        {
+            options.unrestricted = options.unrestricted.max(1);
+        }
+        first = false;
         let mut to_push: Vec<(PathBuf, Vec<Inode>)> = Vec::new();
         for entry in &entries {
             if entry.kind != EntryKind::Directory {
@@ -1278,6 +1284,39 @@ mod tests {
         assert_eq!(code_repr(code2), code_repr(std::process::ExitCode::SUCCESS));
         let text2 = String::from_utf8(out2).unwrap();
         assert!(text2.contains("buried"), "-Ru must recurse: {text2}");
+    }
+
+    #[test]
+    fn recursive_gitignore_filtering_is_independent_for_each_starting_directory() {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        fs::write(
+            dir.path().join(".gitignore"),
+            b"/a_ignored/\n/z_normal/cache/\n",
+        )
+        .unwrap();
+        let ignored = dir.path().join("a_ignored");
+        let normal = dir.path().join("z_normal");
+        fs::create_dir_all(ignored.join("sub")).unwrap();
+        fs::write(ignored.join("sub/ignored_leaf"), b"x").unwrap();
+        fs::create_dir_all(normal.join("cache")).unwrap();
+        fs::write(normal.join("cache/cached_leaf"), b"x").unwrap();
+        fs::create_dir_all(normal.join("visible")).unwrap();
+        fs::write(normal.join("visible/normal_leaf"), b"x").unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = run(
+            os(&["-R", ignored.to_str().unwrap(), normal.to_str().unwrap()]),
+            &mut out,
+            &mut err,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(code_repr(code), code_repr(std::process::ExitCode::SUCCESS));
+        assert!(err.is_empty(), "{err:?}");
+        assert!(text.contains("ignored_leaf"), "{text}");
+        assert!(text.contains("normal_leaf"), "{text}");
+        assert!(!text.contains("cached_leaf"), "{text}");
     }
 
     #[test]

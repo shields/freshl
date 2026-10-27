@@ -60,7 +60,8 @@ owner, group, size (raw bytes grouped in clusters of six), mtime as ISO 8601
 UTC, optional git status, name. Hidden files are always listed.
 
 Options:
-  -R         Recurse into directories (depth-first).
+  -R         Recurse into directories (depth-first). Skip gitignored dirs
+             unless the starting directory is itself gitignored.
   -S         Sort by size, smallest first (largest at the bottom).
   -t         Sort by mtime, oldest first (newest at the bottom).
   -r         Toggle the within-group order; repeat to undo (`-rrrr` is a

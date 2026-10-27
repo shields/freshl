@@ -32,7 +32,7 @@ env:
 jobs:
   test:
     name: test # == job id so the main-branch ruleset's required "test" check still matches
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -52,7 +52,7 @@ jobs:
 
   coverage:
     name: coverage # == job id so the main-branch ruleset's required "coverage" check still matches
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Pinned: newer nightlies have triggered llvm-cov "mismatched data"
     # warnings that drop profile data for some functions, producing phantom
     # uncovered lines. Bump this date deliberately after verifying coverage
@@ -85,7 +85,7 @@ jobs:
 
   zizmor:
     name: zizmor
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

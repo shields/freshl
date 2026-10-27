@@ -394,33 +394,22 @@ impl SnapshotCache {
 
     pub fn for_target(&mut self, target: &Path) -> Option<&Snapshot> {
         let scope = normalize_existing(&scope_dir(target))?;
-        if !self.by_scope.contains_key(&scope) {
-            self.populate_scope(&scope);
-        }
-        let workdir = self.by_scope.get(&scope)?.clone()?;
-        self.by_workdir.get(&workdir)?.as_ref()
-    }
-
-    fn populate_scope(&mut self, scope: &Path) {
-        // `and_then` chains the two failure modes — no repository, or a
-        // bare repo with no workdir — into a single `None` so the negative
-        // cache only needs one insertion point.
-        let resolved = gix::discover(scope).ok().and_then(|repo| {
-            repo.workdir()
-                .and_then(normalize_existing)
-                .map(|wd| (repo, wd))
-        });
-        let Some((repo, workdir)) = resolved else {
-            self.by_scope.insert(scope.to_path_buf(), None);
-            return;
-        };
-        self.by_scope
-            .insert(scope.to_path_buf(), Some(workdir.clone()));
-        if self.by_workdir.contains_key(&workdir) {
-            return;
-        }
-        let snap = build_snapshot(repo, workdir.clone());
-        self.by_workdir.insert(workdir, snap);
+        let workdir = self
+            .by_scope
+            .entry(scope)
+            .or_insert_with_key(|scope| {
+                let (repo, workdir) = gix::discover(scope).ok().and_then(|repo| {
+                    repo.workdir()
+                        .and_then(normalize_existing)
+                        .map(|wd| (repo, wd))
+                })?;
+                self.by_workdir
+                    .entry(workdir.clone())
+                    .or_insert_with(|| build_snapshot(repo, workdir.clone()));
+                Some(workdir)
+            })
+            .as_ref()?;
+        self.by_workdir.get(workdir).and_then(Option::as_ref)
     }
 }
 
@@ -457,7 +446,7 @@ fn rela_to_pathbuf(b: &BStr) -> PathBuf {
 #[must_use]
 pub fn discover(start: &Path) -> Option<Snapshot> {
     let repo = gix::discover(start).ok()?;
-    let workdir = normalize_existing(repo.workdir()?)?;
+    let workdir = repo.workdir().and_then(normalize_existing)?;
     let statuses = collect_statuses(&repo).unwrap_or_default();
     assemble_snapshot(repo, workdir, statuses)
 }
@@ -828,9 +817,7 @@ mod tests {
 
         fn write(&self, rel: &str, content: &[u8]) -> &Self {
             let p = self.dir.path().join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, content).unwrap();
             self
         }
@@ -923,6 +910,46 @@ mod tests {
         use super::rewrite_code;
         assert_eq!(rewrite_code(true), PorcelainCode::COPIED_WORKTREE);
         assert_eq!(rewrite_code(false), PorcelainCode::RENAMED_WORKTREE);
+    }
+
+    #[test]
+    fn worktree_copy_preserves_source_status() {
+        use gix::status::index_worktree::{Item, RewriteSource};
+        let entry = |path: &str, status| gix::dir::Entry {
+            rela_path: path.into(),
+            status,
+            property: None,
+            disk_kind: Some(gix::dir::entry::Kind::File),
+            index_kind: None,
+            pathspec_match: None,
+        };
+        let id = gix::hash::ObjectId::null(gix::hash::Kind::Sha1);
+        let item = Item::Rewrite {
+            source: RewriteSource::CopyFromDirectoryEntry {
+                source_dirwalk_entry: entry("source", gix::dir::entry::Status::Tracked),
+                source_dirwalk_entry_collapsed_directory_status: None,
+                source_dirwalk_entry_id: id,
+            },
+            dirwalk_entry: entry("copy", gix::dir::entry::Status::Untracked),
+            dirwalk_entry_collapsed_directory_status: None,
+            dirwalk_entry_id: id,
+            diff: None,
+            copy: true,
+        };
+        let mut statuses = std::collections::HashMap::from([(
+            PathBuf::from("source"),
+            PorcelainCode::MODIFIED_WORKTREE,
+        )]);
+        super::handle_index_worktree(&item, &mut statuses);
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(
+            statuses.get(Path::new("source")),
+            Some(&PorcelainCode::MODIFIED_WORKTREE),
+        );
+        assert_eq!(
+            statuses.get(Path::new("copy")),
+            Some(&PorcelainCode::COPIED_WORKTREE),
+        );
     }
 
     #[test]
@@ -1585,6 +1612,72 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cache = SnapshotCache::new();
         assert!(cache.for_target(dir.path()).is_none());
+    }
+
+    #[test]
+    fn bare_repository_has_no_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(dir.path(), &["init", "--bare", "-q"]);
+        assert!(discover(dir.path()).is_none());
+        assert!(SnapshotCache::new().for_target(dir.path()).is_none());
+    }
+
+    #[test]
+    fn snapshot_cache_handles_deleted_cwd() {
+        if std::env::var_os("FRESHL_TEST_DELETED_CWD").is_some() {
+            std::fs::remove_dir(std::env::current_dir().unwrap()).unwrap();
+            assert!(super::normalize_existing(Path::new(".")).is_none());
+            assert!(SnapshotCache::new().for_target(Path::new(".")).is_none());
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "git::tests::snapshot_cache_handles_deleted_cwd"])
+            .env("FRESHL_TEST_DELETED_CWD", "1")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn lookup_returns_blank_for_empty_path() {
+        let r = TestRepo::new();
+        assert_eq!(r.snapshot().lookup(Path::new("")), PorcelainCode::BLANK);
+    }
+
+    #[test]
+    fn unreadable_repository_excludes_prevents_snapshot() {
+        let r = TestRepo::new();
+        r.remove_file(".git/info/exclude")
+            .symlink("exclude", ".git/info/exclude");
+        assert!(discover(r.root()).is_none());
+    }
+
+    #[test]
+    fn status_rejects_invalid_untracked_configuration() {
+        let r = TestRepo::new();
+        r.git(&["config", "status.showUntrackedFiles", "invalid"]);
+        let repo =
+            gix::open_opts(r.root(), gix::open::Options::isolated().strict_config(true)).unwrap();
+        let error = super::collect_statuses(&repo).unwrap_err();
+        assert!(format!("{error:?}").contains("showUntrackedFiles"));
+    }
+
+    #[test]
+    fn status_propagates_missing_rewrite_object() {
+        let r = TestRepo::new();
+        let body = "line\n".repeat(40);
+        r.write("from", body.as_bytes()).commit(&["from"], "from");
+        let repo = gix::discover(r.root()).unwrap();
+        let index = repo.index_or_empty().unwrap();
+        let id = index.entries()[0].id.to_string();
+        let (prefix, suffix) = id.split_at(2);
+        std::fs::remove_file(r.root().join(".git/objects").join(prefix).join(suffix)).unwrap();
+        r.rename("from", "to")
+            .write("to", format!("{body}extra\n").as_bytes());
+        let error = super::collect_statuses(&repo).unwrap_err();
+        assert!(format!("{error:?}").contains(&id));
     }
 
     #[test]

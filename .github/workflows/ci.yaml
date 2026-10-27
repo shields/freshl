@@ -46,7 +46,7 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - run: rustup show active-toolchain
+      - run: rustup toolchain install
       - run: make lint PRETTIER='npx --yes prettier'
       - run: make test
 

@@ -933,6 +933,7 @@ mod tests {
         assert!(git_key(Path::new("solo")).unwrap().ends_with("solo"));
         // A path with no leaf name (`freshl ..`) can't be re-keyed → None.
         assert!(git_key(Path::new("..")).is_none());
+        assert!(git_key(Path::new("")).is_none());
         // An unresolvable parent yields None, leaving the caller the literal path.
         assert!(git_key(&root.join("missing/file")).is_none());
     }

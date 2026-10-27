@@ -64,10 +64,8 @@ impl Detector for ProbeDetector {
 
 #[must_use]
 pub fn flip_first_ascii_letter(name: &OsStr) -> Option<OsString> {
-    let bytes = name.as_bytes();
-    let pos = bytes.iter().position(u8::is_ascii_alphabetic)?;
-    let mut out = bytes.to_vec();
-    let byte = out.get_mut(pos)?;
+    let mut out = name.as_bytes().to_vec();
+    let byte = out.iter_mut().find(|byte| byte.is_ascii_alphabetic())?;
     if byte.is_ascii_uppercase() {
         byte.make_ascii_lowercase();
     } else {

@@ -107,9 +107,7 @@ pub fn format_time_styled(time: SystemTime, now: SystemTime, dim: Style) -> Stri
         }
         out.push_str(text);
     }
-    if opened {
-        let _ = write!(out, "{}", dim.render_reset());
-    }
+    let _ = write!(out, "{}", dim.render_reset());
     out
 }
 
@@ -144,6 +142,7 @@ mod tests {
         assert_eq!(parse_iso8601_z("2026-05T09:40:17Z"), None); // no second -
         assert_eq!(parse_iso8601_z("2026-05-01T0940:17Z"), None); // no first :
         assert_eq!(parse_iso8601_z("2026-05-01T09:4017Z"), None); // no second :
+        assert_eq!(parse_iso8601_z("2026-05-01T094017Z"), None);
         assert_eq!(parse_iso8601_z("2026-05-01T09:40:17"), None); // no trailing Z
     }
 

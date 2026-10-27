@@ -35,7 +35,11 @@ fn style_for_colorfgbg(value: Option<&str>) -> Style {
 }
 
 fn style_from_value(value: &str) -> Option<Style> {
-    let bg = value.split(';').next_back()?.parse::<u8>().ok()?;
+    let bg = value
+        .rsplit_once(';')
+        .map_or(value, |(_, bg)| bg)
+        .parse::<u8>()
+        .ok()?;
     Some(match background(bg)? {
         Background::Dark => gray(DARK_BACKGROUND_GRAY),
         Background::Light => gray(LIGHT_BACKGROUND_GRAY),

@@ -1741,6 +1741,12 @@ mod tests {
         let r = TestRepo::new();
         r.write("seed", b"x").commit(&["."], "init");
         r.create_dir("x/y/z");
+        let statuses =
+            std::collections::HashMap::from([(PathBuf::from("x"), PorcelainCode::UNTRACKED)]);
+        assert_eq!(
+            super::compute_dirty_ancestors(&statuses, r.root()),
+            std::collections::HashSet::new(),
+        );
         let snap = r.snapshot();
         assert!(!snap.has_dirty_descendants(r.root()));
         assert_eq!(snap.display_code_for(r.root(), true), PorcelainCode::CLEAN);

@@ -31,7 +31,7 @@ install:
 test:
 	cargo test --all-targets
 
-lint:
+lint: actions-lock-verify-local
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	$(PRETTIER) --check '**/*.md'
@@ -52,7 +52,7 @@ fmt:
 # generators additionally gate themselves out of the coverage *build* with
 # `#![cfg(not(coverage_nightly))]` to keep the pre-commit hook fast.
 coverage:
-	cargo +$(NIGHTLY) llvm-cov --fail-under-regions 100 --ignore-filename-regex '(^|/)tests/'
+	env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_PREFIX -u GIT_OBJECT_DIRECTORY -u GIT_NAMESPACE -u GIT_CEILING_DIRECTORIES -u GIT_ALTERNATE_OBJECT_DIRECTORIES cargo +$(NIGHTLY) llvm-cov --fail-under-regions 100 --ignore-filename-regex '(^|/)tests/'
 
 run:
 	cargo run --release --
@@ -75,3 +75,17 @@ publish publish-dry-run:
 	cd "$$tmp"; \
 	CARGO_TARGET_DIR="$$src/target" cargo check --quiet; \
 	CARGO_TARGET_DIR="$$src/target" cargo publish $(if $(findstring dry,$@),--dry-run,)
+
+.PHONY: actions-lock-install actions-lock actions-lock-verify-local actions-lock-verify
+
+actions-lock-install:
+	gh extension install github/gh-actions-lock --pin v0.4.1 --force
+
+actions-lock:
+	gh actions-lock --no-interactive
+
+actions-lock-verify-local:
+	gh actions-lock --verify-local
+
+actions-lock-verify:
+	gh actions-lock --verify

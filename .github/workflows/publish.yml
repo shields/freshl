@@ -15,9 +15,6 @@
 name: publish
 
 on:
-  # crates.io Trusted Publishing rejects the `workflow_run` trigger, so this
-  # can't gate on CI completion. Use branch protection on `main` so CI must
-  # pass before a commit reaches this trigger.
   push:
     branches: [main]
 
@@ -37,14 +34,20 @@ jobs:
       contents: read
       id-token: write # OIDC token for crates.io Trusted Publishing
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - run: rustup toolchain install
       - run: cargo install gitcalver --locked
-      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - uses: rust-lang/crates-io-auth-action@v1.0.6
         id: auth
       - run: make publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+    needs: verify
+  verify:
+    name: Verify release
+    # GitHub self-repository references resolve CI at this commit without checkout.
+    # https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax/
+    uses: ./.github/workflows/ci.yaml # zizmor: ignore[self-repository] Reusable CI resolves to the caller's commit.

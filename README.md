@@ -73,3 +73,10 @@ else
     alias l='ls -lA'
 fi
 ```
+
+## Development
+
+Install Rust, Bun, and GitHub CLI, then run `make actions-lock-install` once to
+install the pinned workflow lockfile tool. `make lint` checks offline workflow
+coverage as well as Rust and Markdown. `make actions-lock` regenerates workflow
+locks; `make actions-lock-verify` verifies their online provenance.

@@ -16,13 +16,16 @@ name: ci
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
 
+  workflow_call: null
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -34,10 +37,10 @@ jobs:
     name: test # == job id so the main-branch ruleset's required "test" check still matches
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -47,6 +50,9 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
       - run: rustup toolchain install
+      - run: make actions-lock-install
+        env:
+          GH_TOKEN: ${{ github.token }}
       - run: make lint PRETTIER='npx --yes prettier'
       - run: make test
 
@@ -63,14 +69,14 @@ jobs:
       # version is installed; otherwise a hit skips the install step.
       CARGO_LLVM_COV_VERSION: 0.8.7
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6.1.0
         with:
           path: ~/.cargo/bin/cargo-llvm-cov
           key: cargo-llvm-cov-${{ runner.os }}-${{ env.CARGO_LLVM_COV_VERSION }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index/
@@ -79,18 +85,22 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-coverage-
-      - run: rustup toolchain install "$NIGHTLY" --profile minimal --component llvm-tools-preview
-      - run: command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked --version "$CARGO_LLVM_COV_VERSION"
+      - run:
+          rustup toolchain install "$NIGHTLY" --profile minimal --component
+          llvm-tools-preview
+      - run:
+          command -v cargo-llvm-cov || cargo install cargo-llvm-cov --locked
+          --version "$CARGO_LLVM_COV_VERSION"
       - run: make coverage NIGHTLY="$NIGHTLY"
 
   zizmor:
     name: zizmor
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
+      - uses: zizmorcore/zizmor-action@v0.8.1
         with:
           persona: pedantic
           # Gate on zizmor's exit code plus inline annotations rather than

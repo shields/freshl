@@ -96,7 +96,6 @@ fn read_umask() -> u32 {
     prev.bits().into()
 }
 
-#[must_use]
 pub fn run<I>(raw: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,

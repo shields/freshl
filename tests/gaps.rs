@@ -30,10 +30,6 @@
     clippy::tests_outside_test_module,
     reason = "Cargo integration tests live at the file's module root"
 )]
-#![expect(
-    clippy::unwrap_used,
-    reason = "setup failures should abort the test loudly"
-)]
 
 use std::ffi::OsString;
 use std::os::unix::net::UnixListener;

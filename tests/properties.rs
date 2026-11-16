@@ -38,10 +38,6 @@
     clippy::tests_outside_test_module,
     reason = "Cargo integration tests live at the file's module root"
 )]
-#![expect(
-    clippy::unwrap_used,
-    reason = "a generator/materialization failure should abort the test loudly"
-)]
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;

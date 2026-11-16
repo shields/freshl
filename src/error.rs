@@ -27,7 +27,6 @@ pub enum Error {
 }
 
 impl Error {
-    #[must_use]
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Self::Usage(_) => ExitCode::from(2),

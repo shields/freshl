@@ -55,10 +55,6 @@
     clippy::tests_outside_test_module,
     reason = "Cargo integration tests live at the file's module root"
 )]
-#![expect(
-    clippy::unwrap_used,
-    reason = "a generator/oracle setup failure should abort the test loudly"
-)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -28,10 +28,3 @@ security-sensitive TOCTOU surface. Don't guard against TOCTOU. If the filesystem
 changes between when we stat an entry and when we render it, the listing simply
 reflects a different point in time; that staleness is inherent to any listing
 tool, so the resulting behavior is unspecified rather than a bug.
-
-## Commit workflow
-
-Before every commit:
-
-1. Run `/code-review --fix` on the staged changes.
-2. Submit through LGTMCP (`review_and_commit`).

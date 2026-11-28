@@ -923,17 +923,17 @@ mod tests {
             index_kind: None,
             pathspec_match: None,
         };
-        let id = gix::hash::ObjectId::null(gix::hash::Kind::Sha1);
+        let id = gix::hash::Kind::Sha1.empty_blob();
         let item = Item::Rewrite {
             source: RewriteSource::CopyFromDirectoryEntry {
                 source_dirwalk_entry: entry("source", gix::dir::entry::Status::Tracked),
                 source_dirwalk_entry_collapsed_directory_status: None,
-                source_dirwalk_entry_id: id,
+                source_dirwalk_entry_id: Some(id),
             },
             dirwalk_entry: entry("copy", gix::dir::entry::Status::Untracked),
             dirwalk_entry_collapsed_directory_status: None,
-            dirwalk_entry_id: id,
-            diff: None,
+            dirwalk_entry_id: Some(id),
+            similarity: None,
             copy: true,
         };
         let mut statuses = std::collections::HashMap::from([(
